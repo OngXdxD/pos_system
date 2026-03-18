@@ -1,0 +1,111 @@
+.app {
+  min-height: 100svh;
+  padding: 16px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 2px solid #628fe8;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.login-shell {
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+.card {
+  border: 2px solid #628fe8;
+  border-radius: 12px;
+  background: #fffdc5;
+  padding: 16px;
+  text-align: left;
+}
+
+.login-card {
+  width: min(100%, 420px);
+}
+
+.main-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+label {
+  font-size: 14px;
+}
+
+input,
+select,
+button {
+  font: inherit;
+}
+
+input,
+select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 2px solid #628fe8;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fffdc5;
+  color: #628fe8;
+}
+
+button {
+  border: 2px solid #628fe8;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: #628fe8;
+  color: #fffdc5;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  border: 2px solid #628fe8;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+h1,
+h2 {
+  margin: 0 0 8px;
+}
+
+.hint {
+  margin-top: 6px;
+}
+
+.status {
+  margin-top: 8px;
+  font-weight: 600;
+}
