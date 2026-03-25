@@ -1,19 +1,43 @@
 :root {
-  font-family: system-ui, 'Segoe UI', sans-serif;
-  background: #fffdc5;
-  color: #628fe8;
+  --major-color: #628fe8;
+  --sub-color: #fffdc5;
+  --card-bg: #ffffff;
+  --danger: #dc2626;
+  --success: #16a34a;
+  --radius: 10px;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
+  --shadow: 0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
+  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
 }
 
-* {
+*, *::before, *::after {
   box-sizing: border-box;
+  margin: 0;
+  padding: 0;
 }
 
 body {
-  margin: 0;
-  background: #fffdc5;
-  color: #628fe8;
+  background: var(--sub-color);
+  color: #1a1a2e;
+  min-height: 100svh;
 }
 
 #root {
   min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+}
+
+h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.02em; }
+h2 { font-size: 1.05rem; font-weight: 600; }
+h3 { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--major-color); opacity: 0.65; }
+
+p { margin: 0; }
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--major-color);
+  opacity: 0.35;
 }

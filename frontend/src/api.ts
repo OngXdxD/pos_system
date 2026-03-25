@@ -1,4 +1,14 @@
-import type { AuthSession, Employee, TimeEntry, UserRole } from './types';
+import type {
+  AuthSession,
+  CompanyInfo,
+  Employee,
+  MenuItem,
+  Order,
+  OrderLine,
+  OrderStatus,
+  TimeEntry,
+  UserRole,
+} from './types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/$/, '');
 
@@ -7,6 +17,10 @@ function getErrorMessage(payload: unknown, fallback: string): string {
     const maybeMessage = (payload as { message: unknown }).message;
     if (typeof maybeMessage === 'string' && maybeMessage.trim().length > 0) {
       return maybeMessage;
+    }
+    if (Array.isArray(maybeMessage) && maybeMessage.length > 0) {
+      const parts = maybeMessage.filter((m): m is string => typeof m === 'string' && m.trim().length > 0);
+      if (parts.length > 0) return parts.join(' ');
     }
   }
   return fallback;
@@ -97,5 +111,192 @@ export async function changeEmployeePasscode(
     },
     token,
   );
+}
+
+// ─── Menu ─────────────────────────────────────────────────────────────────────
+
+/** Ensures add-on groups include minSelectable (older API/local data may omit it). */
+export function normalizeMenuItems(items: MenuItem[]): MenuItem[] {
+  return items.map((item) => ({
+    ...item,
+    addOnGroups: item.addOnGroups.map((g) => ({
+      ...g,
+      minSelectable: g.minSelectable ?? 0,
+    })),
+  }));
+}
+
+export async function fetchMenuItems(token: string): Promise<MenuItem[]> {
+  const items = await requestJson<MenuItem[]>('/menu', {}, token);
+  return normalizeMenuItems(items);
+}
+
+export async function createMenuItem(
+  data: Omit<MenuItem, 'id'>,
+  token: string,
+): Promise<MenuItem> {
+  const item = await requestJson<MenuItem>('/menu', { method: 'POST', body: JSON.stringify(data) }, token);
+  return normalizeMenuItems([item])[0];
+}
+
+export async function updateMenuItem(
+  id: string,
+  data: MenuItem,
+  token: string,
+): Promise<MenuItem> {
+  const item = await requestJson<MenuItem>(`/menu/${id}`, { method: 'PUT', body: JSON.stringify(data) }, token);
+  return normalizeMenuItems([item])[0];
+}
+
+export async function deleteMenuItem(id: string, token: string): Promise<void> {
+  await requestJson<unknown>(`/menu/${id}`, { method: 'DELETE' }, token);
+}
+
+// ─── Company ──────────────────────────────────────────────────────────────────
+
+export async function fetchCompanyInfo(token: string): Promise<CompanyInfo | null> {
+  try {
+    return await requestJson<CompanyInfo>('/company', {}, token);
+  } catch {
+    return null;
+  }
+}
+
+export async function updateCompanyInfo(data: CompanyInfo, token: string): Promise<CompanyInfo> {
+  return requestJson<CompanyInfo>('/company', { method: 'PUT', body: JSON.stringify(data) }, token);
+}
+
+// ─── Orders ──────────────────────────────────────────────────────────────────
+
+/** Raw shape from API (primary field is `lines`; some APIs may use `items`) */
+type OrderApiRow = {
+  id: string;
+  employeeId: string;
+  totalCents: number;
+  status: OrderStatus;
+  createdAt: string;
+  paymentMethod?: string;
+  paymentMethodDetail?: string;
+  discountCents?: number;
+  orderNumber?: string;
+  sequence?: number;
+  tenderCents?: number;
+  changeDueCents?: number;
+  items?: OrderLine[];
+  lines?: OrderLine[];
+};
+
+/** Sub-type / custom method from API (camelCase or snake_case). Usually the cashier code, e.g. TNG. */
+function extractPaymentMethodDetail(raw: OrderApiRow): string | undefined {
+  const r = raw as OrderApiRow & Record<string, unknown>;
+  const keys = [
+    'paymentMethodDetail',
+    'payment_method_detail',
+    'paymentMethodCode',
+    'payment_method_code',
+    'paymentMethodLabel',
+    'payment_method_label',
+    'paymentSubType',
+    'payment_sub_type',
+  ] as const;
+  for (const k of keys) {
+    const v = r[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return undefined;
+}
+
+function normalizeOrderResponse(raw: OrderApiRow): Order {
+  const lines = raw.items ?? raw.lines ?? [];
+  return {
+    id: raw.id,
+    employeeId: raw.employeeId,
+    totalCents: raw.totalCents,
+    status: raw.status,
+    createdAt: raw.createdAt,
+    paymentMethod: raw.paymentMethod,
+    paymentMethodDetail: extractPaymentMethodDetail(raw),
+    discountCents: raw.discountCents,
+    orderNumber: raw.orderNumber,
+    sequence: raw.sequence,
+    tenderCents: raw.tenderCents,
+    changeDueCents: raw.changeDueCents,
+    lines,
+  };
+}
+
+/** Payload for POST /api/orders — matches backend: `employeeId` + `lines` (no client `id` on lines) */
+export type PlaceOrderLineInput = {
+  menuItemId: string;
+  menuItemName: string;
+  basePrice: number;
+  addOns: OrderLine['addOns'];
+  quantity: number;
+};
+
+export type PlaceOrderPayload = {
+  employeeId: string;
+  lines: PlaceOrderLineInput[];
+  /** Backend enum: CASH | CARD | OTHER (custom cashier codes map to OTHER). */
+  paymentMethod: string;
+  /** Optional cashier method code when `paymentMethod` is OTHER (e.g. TNG). Backend should persist and echo. */
+  paymentMethodDetail?: string;
+  /** Whole-order discount in cents; backend should validate and recompute totalCents */
+  discountCents?: number;
+  /** When payment is cash: amount customer paid (cents). Backend stores and may echo changeDueCents. */
+  tenderCents?: number;
+};
+
+export async function placeOrder(payload: PlaceOrderPayload, token: string): Promise<Order> {
+  const raw = await requestJson<OrderApiRow>(
+    '/orders',
+    { method: 'POST', body: JSON.stringify(payload) },
+    token,
+  );
+  return normalizeOrderResponse(raw);
+}
+
+export async function fetchOrders(
+  token: string,
+  filters?: { status?: OrderStatus; employeeId?: string },
+): Promise<Order[]> {
+  const qs = new URLSearchParams();
+  if (filters?.status) qs.set('status', filters.status);
+  if (filters?.employeeId) qs.set('employeeId', filters.employeeId);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  const rows = await requestJson<OrderApiRow[]>(`/orders${suffix}`, {}, token);
+  return rows.map(normalizeOrderResponse);
+}
+
+export async function fetchOrderById(orderId: string, token: string): Promise<Order> {
+  const raw = await requestJson<OrderApiRow>(`/orders/${orderId}`, {}, token);
+  return normalizeOrderResponse(raw);
+}
+
+/** Any active employee may authorize; backend verifies passcode and logs actor. */
+export async function refundOrder(
+  orderId: string,
+  employeePasscode: string,
+  token: string,
+): Promise<Order> {
+  const raw = await requestJson<OrderApiRow>(
+    `/orders/${orderId}/refund`,
+    { method: 'POST', body: JSON.stringify({ employeePasscode }) },
+    token,
+  );
+  return normalizeOrderResponse(raw);
+}
+
+export async function changeOrderPaymentMethod(
+  orderId: string,
+  body: { employeePasscode: string; paymentMethod: string; paymentMethodDetail?: string },
+  token: string,
+): Promise<Order> {
+  const raw = await requestJson<OrderApiRow>(
+    `/orders/${orderId}/payment-method`,
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+  return normalizeOrderResponse(raw);
 }
 
