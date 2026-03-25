@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { formatOrderDisplay } from './orderDisplay'
+import { formatLineAddOnsSummary, formatOrderDisplay } from './orderDisplay'
 import type { CompanyInfo, Order } from './types'
 
 export type PrintVariant = 'both' | 'receipt' | 'kitchen'
@@ -94,7 +94,7 @@ export function OrderPrintSlips({
                   {line.addOns.length > 0 && (
                     <span className="print-line-addons">
                       {' '}
-                      + {line.addOns.map((a) => a.optionName).join(', ')}
+                      + {formatLineAddOnsSummary(line.addOns)}
                     </span>
                   )}
                 </span>
@@ -162,8 +162,8 @@ export function OrderPrintSlips({
                 <div className="print-kitchen-product">
                   {line.quantity}x {line.menuItemName}
                 </div>
-                {line.addOns.map((a) => (
-                  <div key={a.optionId} className="print-kitchen-addon">
+                {line.addOns.map((a, idx) => (
+                  <div key={`${a.optionId}-${idx}`} className="print-kitchen-addon">
                     - {a.optionName}
                   </div>
                 ))}

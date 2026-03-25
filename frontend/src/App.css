@@ -1633,6 +1633,103 @@
   gap: 8px;
 }
 
+.config-options-multi {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.config-option-stepper {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.config-option-stepper-add {
+  flex: 1;
+  min-width: 0;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 2px solid rgba(0, 0, 0, 0.1);
+  border-radius: 10px;
+  background: var(--sub-color);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.config-option-stepper-add:hover:not(:disabled) {
+  border-color: var(--major-color);
+}
+
+.config-option-stepper-add:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.config-option-stepper-active .config-option-stepper-add {
+  border-color: var(--major-color);
+  box-shadow: inset 0 0 0 1px var(--major-color);
+}
+
+.config-option-stepper-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.config-stepper-qty-badge {
+  flex-shrink: 0;
+  min-width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  font-weight: 800;
+  font-size: 16px;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.config-option-stepper-active .config-stepper-qty-badge {
+  background: var(--major-color);
+  color: var(--sub-color);
+}
+
+.config-stepper-btn {
+  align-self: center;
+  min-width: 48px;
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  border: 2px solid rgba(0, 0, 0, 0.12);
+  background: var(--card-bg);
+  font-size: 1.35rem;
+  font-weight: 700;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0;
+  font-family: inherit;
+  color: inherit;
+  flex-shrink: 0;
+}
+
+.config-stepper-btn:hover:not(:disabled) {
+  border-color: var(--major-color);
+}
+
+.config-stepper-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .config-option-btn {
   display: flex;
   flex-direction: column;

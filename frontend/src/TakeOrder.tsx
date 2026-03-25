@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchMenuItems, placeOrder } from './api'
 import { paymentMethodDetailForApi, resolvePaymentMethodLabel, toApiPaymentMethod } from './paymentMethodApi'
-import { formatOrderDisplay } from './orderDisplay'
+import { formatLineAddOnsSummary, formatOrderDisplay } from './orderDisplay'
 import { OrderPrintSlips, type PrintJob } from './OrderPrintSlips'
 import { useToast } from './Toast'
 import type { AddOnGroup, CompanyInfo, MenuItem, OrderLine, OrderLineAddOn, PaymentMethodConfig } from './types'
@@ -61,17 +61,35 @@ function canEditLine(line: OrderLine, menu: MenuItem[]): boolean {
   return !!item && visibleAddonGroups(item).length > 0
 }
 
-function buildInitialSelections(item: MenuItem, editLine?: OrderLine): Record<string, Set<string>> {
+function optionCountsForGroup(
+  group: AddOnGroup,
+  selections: Record<string, Record<string, number>>,
+): Record<string, number> {
+  const raw = selections[group.id] ?? {}
+  const out: Record<string, number> = {}
+  for (const opt of group.options) out[opt.id] = raw[opt.id] ?? 0
+  return out
+}
+
+function groupTotalCount(counts: Record<string, number>): number {
+  return Object.values(counts).reduce((s, n) => s + n, 0)
+}
+
+function buildInitialSelections(
+  item: MenuItem,
+  editLine?: OrderLine,
+): Record<string, Record<string, number>> {
   const groups = visibleAddonGroups(item)
-  const map: Record<string, Set<string>> = {}
+  const map: Record<string, Record<string, number>> = {}
   for (const g of groups) {
-    const set = new Set<string>()
+    const counts: Record<string, number> = {}
+    for (const opt of g.options) counts[opt.id] = 0
     if (editLine) {
-      for (const opt of g.options) {
-        if (editLine.addOns.some((a) => a.optionId === opt.id)) set.add(opt.id)
+      for (const a of editLine.addOns) {
+        if (Object.prototype.hasOwnProperty.call(counts, a.optionId)) counts[a.optionId] += 1
       }
     }
-    map[g.id] = set
+    map[g.id] = counts
   }
   return map
 }
@@ -87,39 +105,60 @@ interface ConfiguratorProps {
 
 function AddOnConfigurator({ item, editLine, onConfirm, onClose }: ConfiguratorProps) {
   const groups = useMemo(() => visibleAddonGroups(item), [item])
-  const [selections, setSelections] = useState<Record<string, Set<string>>>(() =>
+  const [selections, setSelections] = useState<Record<string, Record<string, number>>>(() =>
     buildInitialSelections(item, editLine),
   )
 
-  function toggleOption(group: AddOnGroup, optionId: string) {
+  function toggleSingleOption(group: AddOnGroup, optionId: string) {
+    const { min, max } = groupMinMax(group)
+    if (max !== 1) return
+    setSelections((prev) => {
+      const prevCounts = optionCountsForGroup(group, prev)
+      const next: Record<string, number> = {}
+      for (const opt of group.options) next[opt.id] = 0
+
+      const on = (prevCounts[optionId] ?? 0) >= 1
+      if (on) {
+        if (min === 0) next[optionId] = 0
+        else return prev
+      } else {
+        next[optionId] = 1
+      }
+      return { ...prev, [group.id]: next }
+    })
+  }
+
+  function stepOption(group: AddOnGroup, optionId: string, delta: 1 | -1) {
     const { min, max } = groupMinMax(group)
     setSelections((prev) => {
-      const set = new Set(prev[group.id] ?? [])
-      if (set.has(optionId)) {
-        if (min > 0 && set.size <= min) {
-          return prev
-        }
-        set.delete(optionId)
-      } else {
-        if (max > 0 && set.size >= max) {
-          if (max === 1) {
-            set.clear()
-            set.add(optionId)
-          }
-        } else {
-          set.add(optionId)
+      const prevCounts = optionCountsForGroup(group, prev)
+      const total = groupTotalCount(prevCounts)
+      const cur = prevCounts[optionId] ?? 0
+
+      if (delta === 1) {
+        if (max > 0 && total >= max) return prev
+        return {
+          ...prev,
+          [group.id]: { ...prevCounts, [optionId]: cur + 1 },
         }
       }
-      return { ...prev, [group.id]: set }
+
+      if (cur <= 0) return prev
+      if (min > 0 && total <= min) return prev
+      return {
+        ...prev,
+        [group.id]: { ...prevCounts, [optionId]: cur - 1 },
+      }
     })
   }
 
   function handleConfirm() {
     const addOns: OrderLineAddOn[] = []
     for (const g of groups) {
-      const selected = selections[g.id] ?? new Set()
+      const counts = optionCountsForGroup(g, selections)
       for (const opt of g.options) {
-        if (selected.has(opt.id)) {
+        const n = counts[opt.id] ?? 0
+        for (let i = 0; i < n; i++) {
           addOns.push({ optionId: opt.id, optionName: opt.name, price: opt.price })
         }
       }
@@ -137,9 +176,10 @@ function AddOnConfigurator({ item, editLine, onConfirm, onClose }: ConfiguratorP
   const selectedTotal = useMemo(() => {
     let t = item.basePrice
     for (const g of groups) {
-      const set = selections[g.id] ?? new Set()
+      const counts = optionCountsForGroup(g, selections)
       for (const opt of g.options) {
-        if (set.has(opt.id)) t += opt.price
+        const n = counts[opt.id] ?? 0
+        t += opt.price * n
       }
     }
     return t
@@ -147,7 +187,7 @@ function AddOnConfigurator({ item, editLine, onConfirm, onClose }: ConfiguratorP
 
   const selectionsValid = useMemo(() => {
     return groups.every((g) => {
-      const n = selections[g.id]?.size ?? 0
+      const n = groupTotalCount(optionCountsForGroup(g, selections))
       const { min, max } = groupMinMax(g)
       return n >= min && n <= max
     })
@@ -165,10 +205,13 @@ function AddOnConfigurator({ item, editLine, onConfirm, onClose }: ConfiguratorP
 
         {groups.map((group) => {
           const { min, max } = groupMinMax(group)
-          const count = selections[group.id]?.size ?? 0
+          const counts = optionCountsForGroup(group, selections)
+          const total = groupTotalCount(counts)
           const hint =
             min === 0 && max > 0
-              ? ` — pick up to ${max}`
+              ? max === 1
+                ? ' — pick one'
+                : ` — up to ${max} total (tap row to add; − to remove)`
               : min === max && max > 0
                 ? ` — pick exactly ${min}`
                 : min > 0 && max > min
@@ -181,27 +224,64 @@ function AddOnConfigurator({ item, editLine, onConfirm, onClose }: ConfiguratorP
                 {group.name}
                 {hint && <span className="config-group-hint">{hint}</span>}
               </p>
-              {min > 0 && count < min && (
+              {min > 0 && total < min && (
                 <p className="config-min-warning">Select at least {min} option{min > 1 ? 's' : ''}</p>
               )}
-              <div className="config-options">
+              <div className={max === 1 ? 'config-options' : 'config-options config-options-multi'}>
                 {group.options.map((opt) => {
-                  const checked = selections[group.id]?.has(opt.id) ?? false
-                  const atMax = max > 0 && count >= max && !checked
+                  const qty = counts[opt.id] ?? 0
+                  const checked = qty > 0
+
+                  if (max === 1) {
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        className={`config-option-btn${checked ? ' selected' : ''}`}
+                        onClick={() => toggleSingleOption(group, opt.id)}
+                      >
+                        <span className="config-option-name">{opt.name}</span>
+                        {opt.price > 0 && (
+                          <span className="config-option-price">+RM {centsToRM(opt.price)}</span>
+                        )}
+                      </button>
+                    )
+                  }
+
+                  const atMax = max > 0 && total >= max
+                  const canRemove = qty > 0 && !(min > 0 && total <= min)
+                  const canAdd = !atMax
 
                   return (
-                    <button
+                    <div
                       key={opt.id}
-                      type="button"
-                      className={`config-option-btn${checked ? ' selected' : ''}`}
-                      disabled={atMax && max > 1}
-                      onClick={() => toggleOption(group, opt.id)}
+                      className={`config-option-stepper${qty > 0 ? ' config-option-stepper-active' : ''}`}
                     >
-                      <span className="config-option-name">{opt.name}</span>
-                      {opt.price > 0 && (
-                        <span className="config-option-price">+RM {centsToRM(opt.price)}</span>
-                      )}
-                    </button>
+                      <button
+                        type="button"
+                        className="config-stepper-btn"
+                        disabled={!canRemove}
+                        onClick={() => stepOption(group, opt.id, -1)}
+                        aria-label={`Remove one ${opt.name}`}
+                      >
+                        −
+                      </button>
+                      <button
+                        type="button"
+                        className="config-option-stepper-add"
+                        disabled={!canAdd}
+                        onClick={() => stepOption(group, opt.id, 1)}
+                        aria-label={`Add ${opt.name}. Quantity ${qty}.`}
+                      >
+                        <span className="config-option-stepper-info">
+                          <span className="config-option-name">{opt.name}</span>
+                          {opt.price > 0 && (
+                            <span className="config-option-price">+RM {centsToRM(opt.price)}</span>
+                          )}
+                        </span>
+                        <span className="config-stepper-qty-badge">{qty}</span>
+                      </button>
+                    </div>
                   )
                 })}
               </div>
@@ -249,7 +329,7 @@ function CartLine({ line, menu, onUpdateQty, onRemove, onEdit }: CartLineProps) 
         <span className="cart-line-price">RM {centsToRM(lineTotal(line))}</span>
       </div>
       {line.addOns.length > 0 && (
-        <p className="cart-line-addons">{line.addOns.map((a) => a.optionName).join(', ')}</p>
+        <p className="cart-line-addons">{formatLineAddOnsSummary(line.addOns)}</p>
       )}
       <div className="cart-line-actions">
         {showEdit && (
