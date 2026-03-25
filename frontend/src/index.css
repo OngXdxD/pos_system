@@ -22,6 +22,8 @@ body {
   background: var(--sub-color);
   color: #1a1a2e;
   min-height: 100svh;
+  min-height: 100dvh;
+  overflow-x: hidden;
 }
 
 #root {

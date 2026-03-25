@@ -20,6 +20,8 @@ export interface Employee {
 export interface TimeEntry {
   id: string;
   employeeId: string;
+  /** When API includes staff name (e.g. GET /time/entries for all employees). */
+  employeeName?: string;
   clockInAt: string;
   clockOutAt: string | null;
 }
@@ -85,6 +87,8 @@ export type OrderStatus = 'PENDING' | 'COMPLETED' | 'CANCELLED' | 'REFUNDED';
 export interface Order {
   id: string;
   employeeId: string;
+  /** When API echoes cashier / creator display name */
+  employeeName?: string;
   /** Normalized from API `items` or `lines` */
   lines: OrderLine[];
   totalCents: number;

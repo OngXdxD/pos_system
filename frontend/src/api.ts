@@ -85,6 +85,11 @@ export async function fetchTimeEntries(employeeId: string, token: string): Promi
   return requestJson<TimeEntry[]>(`/time/entries?${query}`, {}, token);
 }
 
+/** Super Admin: all staff clock entries. Backend should omit `employeeId` query or use role check. */
+export async function fetchAllTimeEntries(token: string): Promise<TimeEntry[]> {
+  return requestJson<TimeEntry[]>('/time/entries', {}, token);
+}
+
 export async function createEmployee(
   input: { name: string; passcode: string; role: UserRole },
   token: string,
@@ -111,6 +116,15 @@ export async function changeEmployeePasscode(
     },
     token,
   );
+}
+
+/** Staff directory for resolving names on orders / timesheet. Fails soft if route missing or forbidden. */
+export async function fetchEmployees(token: string): Promise<Employee[]> {
+  try {
+    return await requestJson<Employee[]>('/employees', {}, token)
+  } catch {
+    return []
+  }
 }
 
 // ─── Menu ─────────────────────────────────────────────────────────────────────
@@ -206,11 +220,29 @@ function extractPaymentMethodDetail(raw: OrderApiRow): string | undefined {
   return undefined;
 }
 
+function extractEmployeeName(raw: OrderApiRow): string | undefined {
+  const r = raw as OrderApiRow & Record<string, unknown>;
+  const keys = [
+    'employeeName',
+    'employee_name',
+    'cashierName',
+    'cashier_name',
+    'createdByName',
+    'created_by_name',
+  ] as const;
+  for (const k of keys) {
+    const v = r[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return undefined;
+}
+
 function normalizeOrderResponse(raw: OrderApiRow): Order {
   const lines = raw.items ?? raw.lines ?? [];
   return {
     id: raw.id,
     employeeId: raw.employeeId,
+    employeeName: extractEmployeeName(raw),
     totalCents: raw.totalCents,
     status: raw.status,
     createdAt: raw.createdAt,
@@ -245,6 +277,11 @@ export type PlaceOrderPayload = {
   discountCents?: number;
   /** When payment is cash: amount customer paid (cents). Backend stores and may echo changeDueCents. */
   tenderCents?: number;
+  /**
+   * When true, backend should create the order as **COMPLETED** (paid at counter).
+   * When false, backend should create as **PENDING** (e.g. await kitchen / fulfillment).
+   */
+  autoCompleteNewOrders?: boolean;
 };
 
 export async function placeOrder(payload: PlaceOrderPayload, token: string): Promise<Order> {
@@ -258,11 +295,13 @@ export async function placeOrder(payload: PlaceOrderPayload, token: string): Pro
 
 export async function fetchOrders(
   token: string,
-  filters?: { status?: OrderStatus; employeeId?: string },
+  filters?: { status?: OrderStatus; employeeId?: string; from?: string; to?: string },
 ): Promise<Order[]> {
   const qs = new URLSearchParams();
   if (filters?.status) qs.set('status', filters.status);
   if (filters?.employeeId) qs.set('employeeId', filters.employeeId);
+  if (filters?.from) qs.set('from', filters.from);
+  if (filters?.to) qs.set('to', filters.to);
   const suffix = qs.toString() ? `?${qs.toString()}` : '';
   const rows = await requestJson<OrderApiRow[]>(`/orders${suffix}`, {}, token);
   return rows.map(normalizeOrderResponse);

@@ -6,14 +6,20 @@ import {
   clockOut,
   createEmployee,
   fetchCompanyInfo,
+  fetchEmployees,
   fetchTimeEntries,
   loginWithPasscode,
   updateCompanyInfo,
 } from './api'
 import { MenuManagementView, loadMenu, saveMenu } from './MenuManagement'
+import { loadAutoCompleteNewOrders, saveAutoCompleteNewOrders } from './autoCompleteOrdersStore'
 import { loadPaymentMethods, savePaymentMethods } from './paymentMethodsStore'
 import { OrderHistoryView } from './OrderHistoryView'
+import { SalesReportView } from './SalesReportView'
 import { TakeOrderView } from './TakeOrder'
+import { TimesheetView } from './TimesheetView'
+import { mergeEmployeeDirectory } from './employeeDisplay'
+import { useToast } from './Toast'
 import type { AuthSession, CompanyInfo, Employee, MenuItem, PaymentMethodConfig, TimeEntry, UserRole } from './types'
 
 const SESSION_KEY = 'clock-system.session.v1'
@@ -31,11 +37,11 @@ const EMPTY_COMPANY: CompanyInfo = {
 }
 
 type ActiveView =
-  | 'records'
+  | 'timesheet'
   | 'order'
   | 'orderHistory'
+  | 'reports'
   | 'menu'
-  | 'employees'
   | 'company'
   | 'settings'
 
@@ -97,28 +103,32 @@ function alertClass(msg: string): string {
 }
 
 export default function App() {
+  const showToast = useToast()
+
   /* ── Session / theme ────────────────────── */
   const [session, setSession] = useState<AuthSession | null>(() => loadSession())
   const [theme, setTheme] = useState<ThemeSettings>(() => loadTheme())
 
   /* ── Navigation ─────────────────────────── */
-  const [activeView, setActiveView] = useState<ActiveView>('order')
+  const [activeView, setActiveView] = useState<ActiveView>(() => {
+    const s = loadSession()
+    if (!s) return 'order'
+    return s.user.role === 'SUPER_ADMIN' ? 'reports' : 'order'
+  })
 
   /* ── Time entries ────────────────────────── */
   const [entries, setEntries] = useState<TimeEntry[]>([])
-  const [entriesError, setEntriesError] = useState<string | null>(null)
-  const [isEntriesLoading, setIsEntriesLoading] = useState(false)
   const [clockMsg, setClockMsg] = useState<string | null>(null)
   const [isClockBusy, setIsClockBusy] = useState(false)
 
   /* ── Login ───────────────────────────────── */
   const [pin, setPin] = useState('')
-  const [loginError, setLoginError] = useState<string | null>(null)
   const [isLoggingIn, setIsLoggingIn] = useState(false)
   const triedPin = useRef<string | null>(null)
 
   /* ── Create employee ─────────────────────── */
   const [createdList, setCreatedList] = useState<Employee[]>([])
+  const [employeeRoster, setEmployeeRoster] = useState<Employee[]>([])
   const [empName, setEmpName] = useState('')
   const [empPin, setEmpPin] = useState('')
   const [empRole, setEmpRole] = useState<UserRole>('EMPLOYEE')
@@ -141,18 +151,32 @@ export default function App() {
   const [companyEdit, setCompanyEdit] = useState<CompanyInfo>(() => loadCompanyInfoLocal())
   const [companyMsg, setCompanyMsg] = useState<string | null>(null)
   const [isSavingCompany, setIsSavingCompany] = useState(false)
+  const [companyUiMode, setCompanyUiMode] = useState<'summary' | 'edit'>('summary')
   const hasLoadedCompany = useRef(false)
+  const prevActiveView = useRef<ActiveView>(activeView)
 
   /* ── Menu ────────────────────────────────── */
   const [menu, setMenu] = useState<MenuItem[]>(() => loadMenu())
 
   /* ── Payment methods (Super Admin → synced to Take Order) ── */
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethodConfig[]>(() => loadPaymentMethods())
+  const [autoCompleteNewOrders, setAutoCompleteNewOrders] = useState(() => loadAutoCompleteNewOrders())
   const [newPayLabel, setNewPayLabel] = useState('')
   const [newPayCode, setNewPayCode] = useState('')
+  const [addPaymentMethodOpen, setAddPaymentMethodOpen] = useState(false)
 
   const currentUser = session?.user ?? null
   const isAdmin = currentUser?.role === 'SUPER_ADMIN'
+
+  const employeeDirectory = useMemo(() => {
+    if (!currentUser) return []
+    return mergeEmployeeDirectory(employeeRoster, createdList, currentUser)
+  }, [employeeRoster, createdList, currentUser])
+
+  const staffRowsSorted = useMemo(
+    () => [...employeeDirectory].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })),
+    [employeeDirectory],
+  )
 
   const activeEntry = useMemo(
     () => entries.find((e) => e.clockOutAt === null) ?? null,
@@ -176,6 +200,14 @@ export default function App() {
   }, [session])
 
   useEffect(() => {
+    if (!session) {
+      setEmployeeRoster([])
+      return
+    }
+    void fetchEmployees(session.token).then(setEmployeeRoster)
+  }, [session])
+
+  useEffect(() => {
     if (!clockMsg) return
     const t = window.setTimeout(() => setClockMsg(null), 5000)
     return () => window.clearTimeout(t)
@@ -191,6 +223,10 @@ export default function App() {
     savePaymentMethods(paymentMethods)
   }, [paymentMethods])
 
+  useEffect(() => {
+    saveAutoCompleteNewOrders(autoCompleteNewOrders)
+  }, [autoCompleteNewOrders])
+
   // Fetch company info from backend the first time the company tab is opened
   useEffect(() => {
     if (activeView !== 'company' || !session || hasLoadedCompany.current) return
@@ -202,6 +238,29 @@ export default function App() {
       }
     })
   }, [activeView, session])
+
+  useEffect(() => {
+    const prev = prevActiveView.current
+    prevActiveView.current = activeView
+    if (activeView !== 'company' || prev === 'company') return
+    setCompanyUiMode('summary')
+    setCompanyMsg(null)
+    setCompanyEdit(companyInfo)
+    // Intentionally only when the active tab changes — `companyInfo` is read from this render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView])
+
+  useEffect(() => {
+    if (activeView !== 'company' || !session || !isAdmin) return
+    void fetchEmployees(session.token).then(setEmployeeRoster)
+  }, [activeView, session, isAdmin])
+
+  useEffect(() => {
+    if (activeView === 'settings') return
+    setAddPaymentMethodOpen(false)
+    setNewPayLabel('')
+    setNewPayCode('')
+  }, [activeView])
 
   // Auto-trigger login when 4 digits typed
   useEffect(() => {
@@ -216,10 +275,10 @@ export default function App() {
   async function doLogin(passcode: string) {
     try {
       setIsLoggingIn(true)
-      setLoginError(null)
       const s = await loginWithPasscode(passcode)
       setSession(s)
       setClockMsg(null)
+      setActiveView(s.user.role === 'SUPER_ADMIN' ? 'reports' : 'order')
       setCreatedList((prev) =>
         prev.some((e) => e.id === s.user.id) ? prev : [...prev, { id: s.user.id, name: s.user.name, role: s.user.role }],
       )
@@ -228,7 +287,7 @@ export default function App() {
     } catch (err) {
       setPin('')
       triedPin.current = null
-      setLoginError(err instanceof Error ? err.message : 'Login failed')
+      showToast(err instanceof Error ? err.message : 'Login failed', 'error')
     } finally {
       setIsLoggingIn(false)
     }
@@ -238,31 +297,25 @@ export default function App() {
     const d = val.replace(/\D/g, '').slice(0, 4)
     setPin(d)
     if (d.length < 4) triedPin.current = null
-    if (loginError) setLoginError(null)
   }
 
   function handleLogout() {
     setSession(null)
     setEntries([])
-    setEntriesError(null)
     setClockMsg(null)
     setCreatedList([])
+    setEmployeeRoster([])
     window.sessionStorage.removeItem(SESSION_KEY)
     setPin('')
-    setLoginError(null)
     setActiveView('order')
   }
 
   async function loadEntries(src = session) {
     if (!src) return
     try {
-      setIsEntriesLoading(true)
-      setEntriesError(null)
       setEntries(await fetchTimeEntries(src.user.id, src.token))
-    } catch (err) {
-      setEntriesError(err instanceof Error ? err.message : 'Failed to load records')
-    } finally {
-      setIsEntriesLoading(false)
+    } catch {
+      setEntries([])
     }
   }
 
@@ -280,7 +333,7 @@ export default function App() {
       }
       await loadEntries()
     } catch (err) {
-      setClockMsg(err instanceof Error ? err.message : 'Clock action failed')
+      showToast(err instanceof Error ? err.message : 'Clock action failed', 'error')
     } finally {
       setIsClockBusy(false)
     }
@@ -291,9 +344,15 @@ export default function App() {
     if (!session) return
     setEmpMsg(null)
     const name = empName.trim()
-    if (!name) { setEmpMsg('Name is required'); return }
+    if (!name) {
+      showToast('Name is required', 'error')
+      return
+    }
     const code = empPin.replace(/\D/g, '')
-    if (code.length !== 4) { setEmpMsg('Passcode must be 4 digits'); return }
+    if (code.length !== 4) {
+      showToast('Passcode must be 4 digits', 'error')
+      return
+    }
     try {
       setIsCreating(true)
       const emp = await createEmployee({ name, passcode: code, role: empRole }, session.token)
@@ -304,7 +363,7 @@ export default function App() {
       setEmpRole('EMPLOYEE')
       setEmpMsg(`Employee created successfully`)
     } catch (err) {
-      setEmpMsg(err instanceof Error ? err.message : 'Failed to create employee')
+      showToast(err instanceof Error ? err.message : 'Failed to create employee', 'error')
     } finally {
       setIsCreating(false)
     }
@@ -314,11 +373,20 @@ export default function App() {
     e.preventDefault()
     if (!session) return
     setPcMsg(null)
-    if (!pcEmpId.trim()) { setPcMsg('Employee ID is required'); return }
+    if (!pcEmpId.trim()) {
+      showToast('Employee ID is required', 'error')
+      return
+    }
     const np = pcNew.replace(/\D/g, '')
-    if (np.length !== 4) { setPcMsg('New passcode must be 4 digits'); return }
+    if (np.length !== 4) {
+      showToast('New passcode must be 4 digits', 'error')
+      return
+    }
     const ap = pcAdmin.replace(/\D/g, '')
-    if (ap.length !== 4) { setPcMsg('Super admin password must be 4 digits'); return }
+    if (ap.length !== 4) {
+      showToast('Super admin PIN must be 4 digits', 'error')
+      return
+    }
     try {
       setIsChangingPc(true)
       await changeEmployeePasscode({ employeeId: pcEmpId.trim(), newPasscode: np, superAdminPasscode: ap }, session.token)
@@ -326,7 +394,7 @@ export default function App() {
       setPcAdmin('')
       setPcMsg('Passcode changed successfully')
     } catch (err) {
-      setPcMsg(err instanceof Error ? err.message : 'Failed to change passcode')
+      showToast(err instanceof Error ? err.message : 'Failed to change passcode', 'error')
     } finally {
       setIsChangingPc(false)
     }
@@ -351,9 +419,10 @@ export default function App() {
       const saved = await updateCompanyInfo(companyEdit, session.token)
       setCompanyInfo(saved)
       setCompanyEdit(saved)
+      setCompanyUiMode('summary')
       setCompanyMsg('Company info updated successfully')
     } catch (err) {
-      setCompanyMsg(err instanceof Error ? err.message : 'Failed to save company info')
+      showToast(err instanceof Error ? err.message : 'Failed to save company info', 'error')
     } finally {
       setIsSavingCompany(false)
     }
@@ -385,8 +454,6 @@ export default function App() {
             placeholder="····"
           />
           {isLoggingIn && <p className="alert alert-info">Signing in…</p>}
-          {loginError && <p className="alert alert-error">{loginError}</p>}
-          <p className="login-hint">Default super admin passcode: 8888</p>
         </div>
       </div>
     )
@@ -395,14 +462,14 @@ export default function App() {
   /* ── Tab definitions ────────────────────── */
 
   const tabs: Array<{ id: ActiveView; label: string }> = [
-    { id: 'records', label: 'Records' },
     { id: 'order', label: 'Take Order' },
     { id: 'orderHistory', label: 'Orders' },
+    { id: 'reports', label: 'Reports' },
+    { id: 'timesheet', label: 'Timesheet' },
     ...(isAdmin
       ? ([
           { id: 'menu', label: 'Menu' },
-          { id: 'employees', label: 'Employees' },
-          { id: 'company', label: 'Company' },
+          { id: 'company', label: 'Staff & company' },
           { id: 'settings', label: 'Settings' },
         ] as Array<{ id: ActiveView; label: string }>)
       : []),
@@ -467,45 +534,6 @@ export default function App() {
       {/* ── Page content ── */}
       <main className="page">
 
-        {/* ─── RECORDS VIEW ─── */}
-        {activeView === 'records' && (
-          <div className="card">
-            <div className="section-header">
-              <h2 className="section-title">Time Records</h2>
-              <button
-                className="btn btn-outline"
-                type="button"
-                onClick={() => void loadEntries()}
-                disabled={isEntriesLoading}
-              >
-                {isEntriesLoading ? 'Loading…' : 'Refresh'}
-              </button>
-            </div>
-            {entriesError && <p className="alert alert-error">{entriesError}</p>}
-            {!entriesError && !isEntriesLoading && entries.length === 0 && (
-              <p className="empty-state">No records yet.</p>
-            )}
-            {entries.length > 0 && (
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Clock In</th>
-                    <th>Clock Out</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {entries.map((entry) => (
-                    <tr key={entry.id}>
-                      <td>{fmt(entry.clockInAt)}</td>
-                      <td>{fmt(entry.clockOutAt)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        )}
-
         {/* ─── TAKE ORDER VIEW ─── */}
         {activeView === 'order' && session && (
           <TakeOrderView
@@ -515,6 +543,7 @@ export default function App() {
             token={session.token}
             companyInfo={companyInfo}
             paymentMethods={paymentMethods}
+            autoCompleteNewOrders={autoCompleteNewOrders}
           />
         )}
 
@@ -526,17 +555,36 @@ export default function App() {
           />
         )}
 
+        {activeView === 'reports' && session && (
+          <SalesReportView
+            token={session.token}
+            paymentMethods={paymentMethods}
+            companyName={companyInfo.companyName}
+          />
+        )}
+
         {/* ─── MENU VIEW (admin) ─── */}
         {activeView === 'menu' && isAdmin && session && (
           <MenuManagementView menu={menu} onMenuChange={setMenu} token={session.token} />
         )}
 
-        {/* ─── EMPLOYEES VIEW (admin) ─── */}
-        {activeView === 'employees' && isAdmin && (
-          <div className="view-grid">
+        {/* ─── TIMESHEET (before Staff & company in tab order) ─── */}
+        {activeView === 'timesheet' && session && (
+          <TimesheetView
+            token={session.token}
+            isAdmin={isAdmin}
+            employeeId={currentUser.id}
+            employees={employeeDirectory}
+          />
+        )}
+
+        {/* ─── STAFF & COMPANY (admin) ─── */}
+        {activeView === 'company' && isAdmin && (
+          <div className="staff-company-page">
+            <div className="staff-company-top">
             <div className="card">
               <div className="section-header">
-                <h2 className="section-title">Create Employee</h2>
+                <h2 className="section-title">Create employee</h2>
               </div>
               <form onSubmit={handleCreateEmployee}>
                 <div className="form-group">
@@ -584,163 +632,221 @@ export default function App() {
               </form>
             </div>
 
-            {createdList.length > 0 && (
-              <div className="card">
-                <div className="section-header">
-                  <h2 className="section-title">Created This Session</h2>
-                </div>
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Name</th>
-                      <th>Role</th>
-                      <th>ID</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {createdList.map((emp) => (
-                      <tr key={emp.id}>
-                        <td>{emp.name}</td>
-                        <td>{emp.role}</td>
-                        <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{emp.id}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ─── COMPANY VIEW (admin) ─── */}
-        {activeView === 'company' && isAdmin && (
-          <div className="view-grid">
-            <div className="card span-full">
+            <div className="card">
               <div className="section-header">
-                <h2 className="section-title">Company Information</h2>
-              </div>
-              <p style={{ opacity: 0.6, marginBottom: 20, fontSize: 14 }}>
-                This information is used on receipts and reports. Only Super Admin can edit it.
-              </p>
-              <form onSubmit={handleSaveCompany}>
-                <div className="view-grid" style={{ gap: 0 }}>
-                  <div className="form-group">
-                    <label className="form-label" htmlFor="co-name">Company Name <span style={{ color: 'var(--danger)' }}>*</span></label>
-                    <input
-                      className="form-input"
-                      id="co-name"
-                      type="text"
-                      placeholder="e.g. Delicious Cafe Sdn Bhd"
-                      value={companyEdit.companyName}
-                      onChange={(e) => setCompanyEdit((p) => ({ ...p, companyName: e.target.value }))}
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label" htmlFor="co-reg">Company Register Number</label>
-                    <input
-                      className="form-input"
-                      id="co-reg"
-                      type="text"
-                      placeholder="e.g. 202301012345 (12 0)"
-                      value={companyEdit.registerNumber}
-                      onChange={(e) => setCompanyEdit((p) => ({ ...p, registerNumber: e.target.value }))}
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label" htmlFor="co-phone">Contact Number</label>
-                    <input
-                      className="form-input"
-                      id="co-phone"
-                      type="tel"
-                      placeholder="e.g. 012-345 6789"
-                      value={companyEdit.contactNumber}
-                      onChange={(e) => setCompanyEdit((p) => ({ ...p, contactNumber: e.target.value }))}
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label" htmlFor="co-email">Email Address</label>
-                    <input
-                      className="form-input"
-                      id="co-email"
-                      type="email"
-                      placeholder="e.g. hello@deliciouscafe.com"
-                      value={companyEdit.email}
-                      onChange={(e) => setCompanyEdit((p) => ({ ...p, email: e.target.value }))}
-                    />
-                  </div>
-                  <div className="form-group span-full">
-                    <label className="form-label" htmlFor="co-addr">Address</label>
-                    <textarea
-                      className="form-input"
-                      id="co-addr"
-                      rows={3}
-                      placeholder="e.g. No. 12, Jalan Maju, 50000 Kuala Lumpur"
-                      value={companyEdit.address}
-                      onChange={(e) => setCompanyEdit((p) => ({ ...p, address: e.target.value }))}
-                      style={{ resize: 'vertical' }}
-                    />
-                  </div>
-                </div>
-
-                <div className="btn-row" style={{ marginTop: 8 }}>
-                  <button className="btn btn-primary" type="submit" disabled={isSavingCompany}>
-                    {isSavingCompany ? 'Saving…' : 'Save Company Info'}
-                  </button>
+                <h2 className="section-title">Company information</h2>
+                {companyUiMode === 'summary' && (
                   <button
-                    className="btn btn-outline"
                     type="button"
-                    onClick={() => { setCompanyEdit(companyInfo); setCompanyMsg(null) }}
+                    className="btn btn-primary"
+                    onClick={() => {
+                      setCompanyEdit(companyInfo)
+                      setCompanyMsg(null)
+                      setCompanyUiMode('edit')
+                    }}
                   >
-                    Discard Changes
+                    Edit info
                   </button>
+                )}
+              </div>
+
+              {companyUiMode === 'summary' && (
+                <>
+                  <dl className="company-summary-dl">
+                    <div>
+                      <dt>Company name</dt>
+                      <dd>{companyInfo.companyName?.trim() || '—'}</dd>
+                    </div>
+                    <div>
+                      <dt>Register number</dt>
+                      <dd>{companyInfo.registerNumber?.trim() || '—'}</dd>
+                    </div>
+                    <div>
+                      <dt>Contact number</dt>
+                      <dd>{companyInfo.contactNumber?.trim() || '—'}</dd>
+                    </div>
+                    <div>
+                      <dt>Email</dt>
+                      <dd>{companyInfo.email?.trim() || '—'}</dd>
+                    </div>
+                    <div className="span-full">
+                      <dt>Address</dt>
+                      <dd style={{ whiteSpace: 'pre-wrap' }}>{companyInfo.address?.trim() || '—'}</dd>
+                    </div>
+                  </dl>
+                  {companyMsg && <p className={alertClass(companyMsg)} style={{ marginTop: 12 }}>{companyMsg}</p>}
+                </>
+              )}
+
+              {companyUiMode === 'edit' && (
+                <form onSubmit={handleSaveCompany}>
+                  <div className="view-grid" style={{ gap: 0 }}>
+                    <div className="form-group">
+                      <label className="form-label" htmlFor="co-name">Company Name <span style={{ color: 'var(--danger)' }}>*</span></label>
+                      <input
+                        className="form-input"
+                        id="co-name"
+                        type="text"
+                        placeholder="e.g. Delicious Cafe Sdn Bhd"
+                        value={companyEdit.companyName}
+                        onChange={(e) => setCompanyEdit((p) => ({ ...p, companyName: e.target.value }))}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label" htmlFor="co-reg">Company Register Number</label>
+                      <input
+                        className="form-input"
+                        id="co-reg"
+                        type="text"
+                        placeholder="e.g. 202301012345 (12 0)"
+                        value={companyEdit.registerNumber}
+                        onChange={(e) => setCompanyEdit((p) => ({ ...p, registerNumber: e.target.value }))}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label" htmlFor="co-phone">Contact Number</label>
+                      <input
+                        className="form-input"
+                        id="co-phone"
+                        type="tel"
+                        placeholder="e.g. 012-345 6789"
+                        value={companyEdit.contactNumber}
+                        onChange={(e) => setCompanyEdit((p) => ({ ...p, contactNumber: e.target.value }))}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label" htmlFor="co-email">Email Address</label>
+                      <input
+                        className="form-input"
+                        id="co-email"
+                        type="email"
+                        placeholder="e.g. hello@deliciouscafe.com"
+                        value={companyEdit.email}
+                        onChange={(e) => setCompanyEdit((p) => ({ ...p, email: e.target.value }))}
+                      />
+                    </div>
+                    <div className="form-group span-full">
+                      <label className="form-label" htmlFor="co-addr">Address</label>
+                      <textarea
+                        className="form-input"
+                        id="co-addr"
+                        rows={3}
+                        placeholder="e.g. No. 12, Jalan Maju, 50000 Kuala Lumpur"
+                        value={companyEdit.address}
+                        onChange={(e) => setCompanyEdit((p) => ({ ...p, address: e.target.value }))}
+                        style={{ resize: 'vertical' }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="btn-row" style={{ marginTop: 8 }}>
+                    <button className="btn btn-primary" type="submit" disabled={isSavingCompany}>
+                      {isSavingCompany ? 'Saving…' : 'Save Company Info'}
+                    </button>
+                    <button
+                      className="btn btn-outline"
+                      type="button"
+                      disabled={isSavingCompany}
+                      onClick={() => {
+                        setCompanyEdit(companyInfo)
+                        setCompanyMsg(null)
+                        setCompanyUiMode('summary')
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  {companyMsg && <p className={alertClass(companyMsg)} style={{ marginTop: 12 }}>{companyMsg}</p>}
+                </form>
+              )}
+            </div>
+            </div>
+
+            <div className="card staff-company-table">
+              <div className="section-header">
+                <h2 className="section-title">All staff</h2>
+                {session && (
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    onClick={() => void fetchEmployees(session.token).then(setEmployeeRoster)}
+                  >
+                    Refresh list
+                  </button>
+                )}
+              </div>
+              {staffRowsSorted.length === 0 ? (
+                <p className="empty-state">No employees loaded. Use Refresh or create staff above.</p>
+              ) : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Role</th>
+                        <th>ID</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {staffRowsSorted.map((emp) => (
+                        <tr key={emp.id}>
+                          <td>{emp.name}</td>
+                          <td>{emp.role}</td>
+                          <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{emp.id}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-                {companyMsg && <p className={alertClass(companyMsg)} style={{ marginTop: 12 }}>{companyMsg}</p>}
-              </form>
+              )}
             </div>
           </div>
         )}
 
-        {/* ─── SETTINGS VIEW (admin) ─── */}
+        {/* ─── SETTINGS (admin) — three columns (~33% each), payment full row below ─── */}
         {activeView === 'settings' && isAdmin && (
-          <div className="view-grid">
-            {/* Theme colors */}
+          <div className="settings-three-col">
             <div className="card">
               <div className="section-header">
-                <h2 className="section-title">Theme Colors</h2>
+                <h2 className="section-title">Appearance</h2>
               </div>
               <form onSubmit={handleSaveTheme}>
-                <div className="form-group">
-                  <label className="form-label" htmlFor="major-color">Major Color</label>
-                  <input
-                    className="color-input"
-                    id="major-color"
-                    type="color"
-                    value={themeEdit.majorColor}
-                    onChange={(e) => setThemeEdit((p) => ({ ...p, majorColor: e.target.value }))}
-                  />
+                <div className="settings-theme-pickers">
+                  <div className="form-group settings-theme-picker">
+                    <label className="form-label" htmlFor="major-color">Major</label>
+                    <input
+                      className="color-input"
+                      id="major-color"
+                      type="color"
+                      value={themeEdit.majorColor}
+                      onChange={(e) => setThemeEdit((p) => ({ ...p, majorColor: e.target.value }))}
+                      aria-label="Major theme color"
+                    />
+                  </div>
+                  <div className="form-group settings-theme-picker">
+                    <label className="form-label" htmlFor="sub-color">Sub</label>
+                    <input
+                      className="color-input"
+                      id="sub-color"
+                      type="color"
+                      value={themeEdit.subColor}
+                      onChange={(e) => setThemeEdit((p) => ({ ...p, subColor: e.target.value }))}
+                      aria-label="Sub theme color"
+                    />
+                  </div>
                 </div>
-                <div className="form-group">
-                  <label className="form-label" htmlFor="sub-color">Sub Color</label>
-                  <input
-                    className="color-input"
-                    id="sub-color"
-                    type="color"
-                    value={themeEdit.subColor}
-                    onChange={(e) => setThemeEdit((p) => ({ ...p, subColor: e.target.value }))}
-                  />
-                </div>
-                <div className="color-preview">
+                <div className="color-preview settings-color-preview">
                   <div className="color-swatch">
                     <div className="swatch-dot" style={{ background: themeEdit.majorColor }} />
-                    Major: {themeEdit.majorColor}
+                    <span className="settings-hex">{themeEdit.majorColor}</span>
                   </div>
                   <div className="color-swatch">
                     <div className="swatch-dot" style={{ background: themeEdit.subColor }} />
-                    Sub: {themeEdit.subColor}
+                    <span className="settings-hex">{themeEdit.subColor}</span>
                   </div>
                 </div>
-                <div className="btn-row">
-                  <button className="btn btn-primary" type="submit">Save Colors</button>
+                <div className="btn-row" style={{ marginTop: 8 }}>
+                  <button className="btn btn-primary" type="submit">Save colors</button>
                   <button
                     className="btn btn-outline"
                     type="button"
@@ -751,91 +857,16 @@ export default function App() {
                       setThemeMsg('Reset to default')
                     }}
                   >
-                    Reset Default
+                    Reset to default
                   </button>
                 </div>
-                {themeMsg && <p className={alertClass(themeMsg)}>{themeMsg}</p>}
+                {themeMsg && <p className={alertClass(themeMsg)} style={{ marginTop: 12 }}>{themeMsg}</p>}
               </form>
             </div>
 
-            {/* Payment methods (cashier checkout) */}
-            <div className="card span-full">
-              <div className="section-header">
-                <h2 className="section-title">Payment methods</h2>
-              </div>
-              <p style={{ fontSize: 13, opacity: 0.65, marginBottom: 14 }}>
-                These options appear on <strong>Take Order</strong> so cashiers can record how the customer paid.
-                The <strong>Code</strong> is sent to the server (e.g. <code>CASH</code>, <code>CARD</code>) — match your
-                backend enum.
-              </p>
-              <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 16px' }}>
-                {paymentMethods.map((p) => (
-                  <li
-                    key={p.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 10,
-                      padding: '8px 0',
-                      borderBottom: '1px solid rgba(0,0,0,0.06)',
-                    }}
-                  >
-                    <span style={{ flex: 1, fontWeight: 600 }}>{p.label}</span>
-                    <code style={{ fontSize: 12, opacity: 0.75 }}>{p.code}</code>
-                    <button
-                      type="button"
-                      className="btn btn-danger"
-                      style={{ padding: '4px 10px', fontSize: 12 }}
-                      onClick={() => setPaymentMethods((prev) => prev.filter((x) => x.id !== p.id))}
-                    >
-                      Remove
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              <div className="menu-add-row" style={{ border: 'none', margin: 0, padding: 0 }}>
-                <div className="form-group" style={{ flex: 1, minWidth: 140 }}>
-                  <label className="form-label" htmlFor="pm-label">Display name</label>
-                  <input
-                    id="pm-label"
-                    className="form-input"
-                    placeholder="e.g. Touch n Go"
-                    value={newPayLabel}
-                    onChange={(e) => setNewPayLabel(e.target.value)}
-                  />
-                </div>
-                <div className="form-group" style={{ flex: 1, minWidth: 120 }}>
-                  <label className="form-label" htmlFor="pm-code">Code (API)</label>
-                  <input
-                    id="pm-code"
-                    className="form-input"
-                    placeholder="e.g. TNG"
-                    value={newPayCode}
-                    onChange={(e) => setNewPayCode(e.target.value.toUpperCase().replace(/\s+/g, '_'))}
-                  />
-                </div>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  style={{ alignSelf: 'flex-end' }}
-                  onClick={() => {
-                    const label = newPayLabel.trim()
-                    const code = newPayCode.trim()
-                    if (!label || !code) return
-                    setPaymentMethods((prev) => [...prev, { id: crypto.randomUUID(), label, code }])
-                    setNewPayLabel('')
-                    setNewPayCode('')
-                  }}
-                >
-                  Add method
-                </button>
-              </div>
-            </div>
-
-            {/* Change passcode */}
             <div className="card">
               <div className="section-header">
-                <h2 className="section-title">Change Employee Passcode</h2>
+                <h2 className="section-title">Employee passcode</h2>
               </div>
               <form onSubmit={handleChangePasscode}>
                 <div className="form-group">
@@ -844,15 +875,16 @@ export default function App() {
                     className="form-input"
                     id="pc-emp-id"
                     type="text"
-                    placeholder="Paste ID from Employees tab"
+                    placeholder="From staff table"
                     value={pcEmpId}
                     onChange={(e) => setPcEmpId(e.target.value)}
+                    autoComplete="off"
                   />
                 </div>
                 <div className="form-group">
-                  <label className="form-label" htmlFor="pc-new">New Passcode (4 digits)</label>
+                  <label className="form-label" htmlFor="pc-new">New passcode</label>
                   <input
-                    className="form-input"
+                    className="form-input settings-pin-input"
                     id="pc-new"
                     type="password"
                     inputMode="numeric"
@@ -863,9 +895,9 @@ export default function App() {
                   />
                 </div>
                 <div className="form-group">
-                  <label className="form-label" htmlFor="pc-admin">Super Admin Password</label>
+                  <label className="form-label" htmlFor="pc-admin">Super admin PIN</label>
                   <input
-                    className="form-input"
+                    className="form-input settings-pin-input"
                     id="pc-admin"
                     type="password"
                     inputMode="numeric"
@@ -877,11 +909,134 @@ export default function App() {
                 </div>
                 <div className="btn-row">
                   <button className="btn btn-primary" type="submit" disabled={isChangingPc}>
-                    {isChangingPc ? 'Updating…' : 'Change Passcode'}
+                    {isChangingPc ? 'Updating…' : 'Update passcode'}
                   </button>
                 </div>
-                {pcMsg && <p className={alertClass(pcMsg)}>{pcMsg}</p>}
+                {pcMsg && <p className={alertClass(pcMsg)} style={{ marginTop: 12 }}>{pcMsg}</p>}
               </form>
+            </div>
+
+            <div className="card">
+              <div className="section-header">
+                <h2 className="section-title">New orders</h2>
+              </div>
+              <div className="settings-option-panel">
+                <div className="settings-option-main">
+                  <span className="settings-option-title">Auto-complete new orders</span>
+                </div>
+                <label className="settings-switch" title={autoCompleteNewOrders ? 'Completed by default' : 'Pending by default'}>
+                  <input
+                    type="checkbox"
+                    className="settings-switch-input"
+                    checked={autoCompleteNewOrders}
+                    onChange={(e) => setAutoCompleteNewOrders(e.target.checked)}
+                  />
+                  <span className="settings-switch-slider" aria-hidden />
+                  <span className="visually-hidden">Auto-complete new orders</span>
+                </label>
+              </div>
+            </div>
+
+            <div className="card settings-three-col-span">
+              <div className="section-header">
+                <h2 className="section-title">Payment methods</h2>
+              </div>
+              {paymentMethods.length === 0 ? (
+                <p className="empty-state">No payment methods yet.</p>
+              ) : (
+                <div className="settings-pm-table-wrap">
+                  <table className="settings-pm-table data-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Code</th>
+                        <th className="settings-pm-col-action" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {paymentMethods.map((p) => (
+                        <tr key={p.id}>
+                          <td className="settings-pm-name">{p.label}</td>
+                          <td>
+                            <code className="settings-pm-code">{p.code}</code>
+                          </td>
+                          <td className="settings-pm-col-action">
+                            <button
+                              type="button"
+                              className="btn btn-danger btn-sm"
+                              onClick={() => setPaymentMethods((prev) => prev.filter((x) => x.id !== p.id))}
+                            >
+                              Remove
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {!addPaymentMethodOpen ? (
+                <div className="btn-row" style={{ marginTop: 12 }}>
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    onClick={() => setAddPaymentMethodOpen(true)}
+                  >
+                    New payment method
+                  </button>
+                </div>
+              ) : (
+                <div className="settings-pm-add" style={{ marginTop: 12 }}>
+                  <div className="settings-pm-add-row">
+                    <div className="form-group settings-pm-field">
+                      <label className="form-label" htmlFor="pm-label">Name</label>
+                      <input
+                        id="pm-label"
+                        className="form-input"
+                        placeholder="e.g. Touch n Go"
+                        value={newPayLabel}
+                        onChange={(e) => setNewPayLabel(e.target.value)}
+                      />
+                    </div>
+                    <div className="form-group settings-pm-field">
+                      <label className="form-label" htmlFor="pm-code">Code</label>
+                      <input
+                        id="pm-code"
+                        className="form-input settings-pm-code-input"
+                        placeholder="e.g. TNG"
+                        value={newPayCode}
+                        onChange={(e) => setNewPayCode(e.target.value.toUpperCase().replace(/\s+/g, '_'))}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-primary settings-pm-add-btn"
+                      onClick={() => {
+                        const label = newPayLabel.trim()
+                        const code = newPayCode.trim()
+                        if (!label || !code) return
+                        setPaymentMethods((prev) => [...prev, { id: crypto.randomUUID(), label, code }])
+                        setNewPayLabel('')
+                        setNewPayCode('')
+                        setAddPaymentMethodOpen(false)
+                      }}
+                    >
+                      Add
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-outline settings-pm-add-btn"
+                      onClick={() => {
+                        setNewPayLabel('')
+                        setNewPayCode('')
+                        setAddPaymentMethodOpen(false)
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

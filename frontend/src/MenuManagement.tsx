@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createMenuItem, deleteMenuItem, fetchMenuItems, normalizeMenuItems, updateMenuItem } from './api'
+import { useToast } from './Toast'
 import type { AddOnGroup, AddOnOption, MenuItem } from './types'
 
 const MENU_KEY = 'clock-system.menu.v1'
@@ -192,6 +193,7 @@ interface MenuItemEditorProps {
 }
 
 function MenuItemEditor({ item, isSaving, onSave, onDelete }: MenuItemEditorProps) {
+  const showToast = useToast()
   // local is the working copy; savedSnapshot tracks what was last saved to backend
   const [local, setLocal] = useState<MenuItem>(item)
   const savedSnapshot = useRef(JSON.stringify(item))
@@ -231,7 +233,7 @@ function MenuItemEditor({ item, isSaving, onSave, onDelete }: MenuItemEditorProp
       savedSnapshot.current = JSON.stringify(local)
       setSaveMsg({ text: 'Saved successfully', ok: true })
     } catch (err) {
-      setSaveMsg({ text: err instanceof Error ? err.message : 'Save failed', ok: false })
+      showToast(err instanceof Error ? err.message : 'Save failed', 'error')
     }
   }
 
@@ -279,22 +281,15 @@ function MenuItemEditor({ item, isSaving, onSave, onDelete }: MenuItemEditorProp
         </button>
       </div>
 
-      {saveMsg && (
-        <p
-          className={`alert ${saveMsg.ok ? 'alert-success' : 'alert-error'}`}
-          style={{ margin: '6px 12px 2px' }}
-        >
+      {saveMsg?.ok && (
+        <p className="alert alert-success" style={{ margin: '6px 12px 2px' }}>
           {saveMsg.text}
         </p>
       )}
 
       {expanded && (
         <div className="menu-item-addons">
-          {local.addOnGroups.length === 0 && (
-            <p className="empty-state" style={{ padding: '12px 0' }}>
-              No add-on groups yet. Click below to add one.
-            </p>
-          )}
+          {local.addOnGroups.length === 0 && <p className="empty-state" style={{ padding: '12px 0' }}>No add-on groups.</p>}
           {local.addOnGroups.map((group, i) => (
             <AddOnGroupCard
               key={group.id}
@@ -306,9 +301,6 @@ function MenuItemEditor({ item, isSaving, onSave, onDelete }: MenuItemEditorProp
           <button type="button" className="btn btn-ghost" onClick={addGroup}>
             + Add Add-on Group
           </button>
-          <p style={{ fontSize: 12, opacity: 0.55, marginTop: 8 }}>
-            Changes to add-ons are saved when you click "Save Changes" on the item.
-          </p>
         </div>
       )}
     </div>
@@ -324,8 +316,8 @@ interface MenuManagementViewProps {
 }
 
 export function MenuManagementView({ menu, onMenuChange, token }: MenuManagementViewProps) {
+  const showToast = useToast()
   const [isLoading, setIsLoading] = useState(false)
-  const [loadError, setLoadError] = useState<string | null>(null)
   const [savingIds, setSavingIds] = useState<Set<string>>(new Set())
   const [newName, setNewName] = useState('')
   const [newPrice, setNewPrice] = useState('')
@@ -339,12 +331,12 @@ export function MenuManagementView({ menu, onMenuChange, token }: MenuManagement
   async function fetchAndLoad() {
     try {
       setIsLoading(true)
-      setLoadError(null)
       const items = await fetchMenuItems(token)
       onMenuChange(items)
     } catch (err) {
-      setLoadError(
-        err instanceof Error ? err.message : 'Could not reach backend',
+      showToast(
+        `${err instanceof Error ? err.message : 'Could not reach backend'} — showing local menu.`,
+        'error',
       )
     } finally {
       setIsLoading(false)
@@ -355,7 +347,7 @@ export function MenuManagementView({ menu, onMenuChange, token }: MenuManagement
     e.preventDefault()
     const name = newName.trim()
     if (!name) {
-      setTopMsg({ text: 'Item name is required', ok: false })
+      showToast('Item name is required', 'error')
       return
     }
     try {
@@ -370,10 +362,7 @@ export function MenuManagementView({ menu, onMenuChange, token }: MenuManagement
       setNewPrice('')
       setTopMsg({ text: `"${name}" added to menu`, ok: true })
     } catch (err) {
-      setTopMsg({
-        text: err instanceof Error ? err.message : 'Failed to add item',
-        ok: false,
-      })
+      showToast(err instanceof Error ? err.message : 'Failed to add item', 'error')
     } finally {
       setIsAdding(false)
     }
@@ -416,12 +405,6 @@ export function MenuManagementView({ menu, onMenuChange, token }: MenuManagement
         </button>
       </div>
 
-      {loadError && (
-        <p className="alert alert-error" style={{ marginBottom: 12 }}>
-          {loadError} — showing locally saved data.
-        </p>
-      )}
-
       {/* Add new item */}
       <form onSubmit={handleAddItem} className="menu-add-row">
         <div className="form-group">
@@ -462,11 +445,7 @@ export function MenuManagementView({ menu, onMenuChange, token }: MenuManagement
         </button>
       </form>
 
-      {topMsg && (
-        <p className={`alert ${topMsg.ok ? 'alert-success' : 'alert-error'}`}>
-          {topMsg.text}
-        </p>
-      )}
+      {topMsg?.ok && <p className="alert alert-success">{topMsg.text}</p>}
 
       {isLoading && <p className="alert alert-info">Loading menu from server…</p>}
       {!isLoading && menu.length === 0 && (

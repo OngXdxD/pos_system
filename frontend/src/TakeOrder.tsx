@@ -3,6 +3,7 @@ import { fetchMenuItems, placeOrder } from './api'
 import { paymentMethodDetailForApi, resolvePaymentMethodLabel, toApiPaymentMethod } from './paymentMethodApi'
 import { formatOrderDisplay } from './orderDisplay'
 import { OrderPrintSlips, type PrintJob } from './OrderPrintSlips'
+import { useToast } from './Toast'
 import type { AddOnGroup, CompanyInfo, MenuItem, OrderLine, OrderLineAddOn, PaymentMethodConfig } from './types'
 
 function centsToRM(cents: number): string {
@@ -296,6 +297,8 @@ export interface TakeOrderViewProps {
   token: string
   companyInfo: CompanyInfo
   paymentMethods: PaymentMethodConfig[]
+  /** From Settings: whether POST /orders should ask API for COMPLETED vs PENDING. */
+  autoCompleteNewOrders: boolean
 }
 
 export function TakeOrderView({
@@ -305,7 +308,9 @@ export function TakeOrderView({
   token,
   companyInfo,
   paymentMethods,
+  autoCompleteNewOrders,
 }: TakeOrderViewProps) {
+  const showToast = useToast()
   const [cart, setCart] = useState<OrderLine[]>([])
   const [modalCtx, setModalCtx] = useState<ModalCtx | null>(null)
   const [isPlacing, setIsPlacing] = useState(false)
@@ -430,19 +435,19 @@ export function TakeOrderView({
   async function handlePlaceOrder() {
     if (cart.length === 0) return
     if (paymentMethods.length === 0) {
-      setMsg({ text: 'No payment methods configured. Ask Super Admin to add them in Settings.', ok: false })
+      showToast('No payment methods configured. Add them in Settings.', 'error')
       return
     }
     if (isCashPayment) {
       if (tenderCentsParsed <= 0) {
-        setMsg({ text: 'Enter how much cash the customer paid.', ok: false })
+        showToast('Enter how much cash the customer paid.', 'error')
         return
       }
       if (tenderCentsParsed < totalAfterDiscount) {
-        setMsg({
-          text: `Customer still owes RM ${centsToRM(shortByCents)}. Increase amount received or adjust the order.`,
-          ok: false,
-        })
+        showToast(
+          `Customer still owes RM ${centsToRM(shortByCents)}. Increase amount received or adjust the order.`,
+          'error',
+        )
         return
       }
     }
@@ -458,6 +463,7 @@ export function TakeOrderView({
           paymentMethodDetail: detail,
           discountCents: discountCents > 0 ? discountCents : undefined,
           tenderCents: isCashPayment ? tenderCentsParsed : undefined,
+          autoCompleteNewOrders,
           lines: cart.map(({ menuItemId, menuItemName, basePrice, addOns, quantity }) => ({
             menuItemId,
             menuItemName,
@@ -498,7 +504,7 @@ export function TakeOrderView({
         ok: true,
       })
     } catch (err) {
-      setMsg({ text: err instanceof Error ? err.message : 'Failed to place order', ok: false })
+      showToast(err instanceof Error ? err.message : 'Failed to place order', 'error')
     } finally {
       setIsPlacing(false)
     }
@@ -714,9 +720,6 @@ export function TakeOrderView({
               <span>Due (est.)</span>
               <span className="cart-total-amount">RM {centsToRM(totalAfterDiscount)}</span>
             </div>
-            <p style={{ fontSize: 11, opacity: 0.5, margin: '4px 0 8px' }}>
-              Final total is calculated on the server after you place the order.
-            </p>
             <button
               type="button"
               className="btn btn-primary btn-lg"
@@ -728,8 +731,8 @@ export function TakeOrderView({
           </div>
         )}
 
-        {msg && (
-          <p className={`alert ${msg.ok ? 'alert-success' : 'alert-error'}`} style={{ marginTop: 12 }}>
+        {msg?.ok && (
+          <p className="alert alert-success" style={{ marginTop: 12 }}>
             {msg.text}
           </p>
         )}

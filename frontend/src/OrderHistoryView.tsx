@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { defaultCustomRangeStrings, filterOrdersInRange, parseLocalDateInput } from './reportUtils'
 import {
   changeOrderPaymentMethod,
   fetchOrders,
@@ -6,11 +7,14 @@ import {
 } from './api'
 import { formatOrderDisplay } from './orderDisplay'
 import { OrderPrintSlips, type PrintJob } from './OrderPrintSlips'
+import { downloadCsv, toCsvRow } from './csvExport'
 import {
   paymentMethodDetailForApi,
   resolvePaymentMethodLabel,
   toApiPaymentMethod,
 } from './paymentMethodApi'
+import { escapeHtml, printHtmlDocument } from './printHtml'
+import { useToast } from './Toast'
 import type { CompanyInfo, Order, OrderStatus, PaymentMethodConfig } from './types'
 
 function centsToRM(cents: number): string {
@@ -43,6 +47,28 @@ function orderStatusLabel(s: OrderStatus): string {
   return ORDER_STATUS_LABEL[s]
 }
 
+/** `YYYY-MM-DD` for `<input type="date">` in the device local calendar. */
+function localTodayYmd(): string {
+  const t = new Date()
+  const y = t.getFullYear()
+  const m = String(t.getMonth() + 1).padStart(2, '0')
+  const d = String(t.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+function formatHistoryDayLabel(ymd: string): string {
+  try {
+    return parseLocalDateInput(ymd, false).toLocaleDateString(undefined, {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    })
+  } catch {
+    return ymd
+  }
+}
+
 function resolvePaymentCodeForEdit(o: Order, methods: PaymentMethodConfig[]): string {
   const code = o.paymentMethod
   if (!code) return methods[0]?.code ?? ''
@@ -68,7 +94,9 @@ export function OrderHistoryView({
   companyInfo: CompanyInfo
   paymentMethods: PaymentMethodConfig[]
 }) {
+  const showToast = useToast()
   const [orders, setOrders] = useState<Order[]>([])
+  const [historyDay, setHistoryDay] = useState(() => defaultCustomRangeStrings().from)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
   const [printJob, setPrintJob] = useState<PrintJob | null>(null)
@@ -82,22 +110,31 @@ export function OrderHistoryView({
 
   const finishPrint = useCallback(() => setPrintJob(null), [])
 
-  async function load() {
+  const load = useCallback(async () => {
+    const fromD = parseLocalDateInput(historyDay, false)
+    const toD = parseLocalDateInput(historyDay, true)
     try {
       setLoading(true)
       setErr(null)
-      const list = await fetchOrders(token)
-      setOrders(list)
+      const list = await fetchOrders(token, {
+        from: fromD.toISOString(),
+        to: toD.toISOString(),
+      })
+      setOrders(filterOrdersInRange(list, fromD, toD))
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Failed to load orders')
     } finally {
       setLoading(false)
     }
-  }
+  }, [token, historyDay])
 
   useEffect(() => {
     void load()
-  }, [token])
+  }, [load])
+
+  useEffect(() => {
+    if (err) showToast(err, 'error')
+  }, [err, showToast])
 
   function openRefund(o: Order) {
     setActionOrder(o)
@@ -150,7 +187,7 @@ export function OrderHistoryView({
     if (!actionOrder || !actionKind) return
     const pc = passcode.replace(/\D/g, '').slice(0, 4)
     if (pc.length !== 4) {
-      setActionFeedback({ ok: false, text: 'Enter a valid 4-digit passcode' })
+      showToast('Enter a valid 4-digit passcode', 'error')
       return
     }
     try {
@@ -159,13 +196,10 @@ export function OrderHistoryView({
       if (actionKind === 'refund') {
         const updated = await refundOrder(actionOrder.id, pc, token)
         setOrders((prev) => prev.map((x) => (x.id === updated.id ? updated : x)))
-        setActionFeedback({
-          ok: true,
-          text: 'Refund recorded. Verifier identity should be stored on the server.',
-        })
+        setActionFeedback({ ok: true, text: 'Refund recorded.' })
       } else {
         if (!newPaymentCode) {
-          setActionFeedback({ ok: false, text: 'Choose a payment method' })
+          showToast('Choose a payment method', 'error')
           setActionBusy(false)
           return
         }
@@ -177,14 +211,11 @@ export function OrderHistoryView({
           token,
         )
         setOrders((prev) => prev.map((x) => (x.id === updated.id ? updated : x)))
-        setActionFeedback({
-          ok: true,
-          text: 'Payment method updated. Verifier identity should be stored on the server.',
-        })
+        setActionFeedback({ ok: true, text: 'Payment updated.' })
       }
       setTimeout(closeAction, 1600)
     } catch (e) {
-      setActionFeedback({ ok: false, text: e instanceof Error ? e.message : 'Request failed' })
+      showToast(e instanceof Error ? e.message : 'Request failed', 'error')
     } finally {
       setActionBusy(false)
     }
@@ -195,26 +226,95 @@ export function OrderHistoryView({
     [orders],
   )
 
+  const historyDayLabel = useMemo(() => formatHistoryDayLabel(historyDay), [historyDay])
+  const isToday = historyDay === localTodayYmd()
+
+  function exportOrdersCsv() {
+    const lines = [
+      toCsvRow(['Order', 'Created (ISO)', 'Total (RM)', 'Status', 'Payment', 'Order ID']),
+    ]
+    for (const o of sorted) {
+      lines.push(
+        toCsvRow([
+          formatOrderDisplay(o),
+          o.createdAt,
+          centsToRM(o.totalCents),
+          orderStatusLabel(o.status),
+          resolvePaymentMethodLabel(paymentMethods, {
+            paymentMethod: o.paymentMethod,
+            paymentMethodDetail: o.paymentMethodDetail,
+          }),
+          o.id,
+        ]),
+      )
+    }
+    downloadCsv(`orders-${historyDay}.csv`, lines)
+  }
+
+  function printOrderList() {
+    const co = companyInfo.companyName?.trim() || 'Order history'
+    const blocks = sorted
+      .map((o) => {
+        const pay = resolvePaymentMethodLabel(paymentMethods, {
+          paymentMethod: o.paymentMethod,
+          paymentMethodDetail: o.paymentMethodDetail,
+        })
+        return `<div class="receipt-block">
+<div class="receipt-line"><span>Order</span><span>${escapeHtml(formatOrderDisplay(o))}</span></div>
+<div class="receipt-line"><span>Time</span><span>${escapeHtml(fmt(o.createdAt))}</span></div>
+<div class="receipt-line"><span>Total</span><span>RM ${escapeHtml(centsToRM(o.totalCents))}</span></div>
+<div class="receipt-line"><span>Status</span><span>${escapeHtml(orderStatusLabel(o.status))}</span></div>
+<div class="receipt-line"><span>Pay</span><span>${escapeHtml(pay)}</span></div>
+</div><div class="receipt-dash"></div>`
+      })
+      .join('')
+    const html = `<div class="receipt-title">${escapeHtml(co)}</div>
+<div class="receipt-sub">${escapeHtml(historyDayLabel)} · ${sorted.length} order(s)</div>
+<div class="receipt-dash"></div>
+${blocks || '<p class="receipt-muted">No orders</p>'}`
+    printHtmlDocument('Order history', html)
+  }
+
   return (
     <div className="card span-full">
       <OrderPrintSlips job={printJob} onAfterPrint={finishPrint} />
 
       <div className="section-header">
         <h2 className="section-title">Order history</h2>
-        <button type="button" className="btn btn-outline" disabled={loading} onClick={() => void load()}>
-          {loading ? 'Loading…' : 'Refresh'}
-        </button>
+        <div className="btn-row" style={{ margin: 0, flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+          <label className="form-label" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ whiteSpace: 'nowrap' }}>Day</span>
+            <input
+              className="form-input"
+              type="date"
+              value={historyDay}
+              onChange={(e) => setHistoryDay(e.target.value)}
+              disabled={loading}
+              style={{ width: 'auto', minWidth: 140 }}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn btn-outline"
+            disabled={loading || isToday}
+            onClick={() => setHistoryDay(localTodayYmd())}
+          >
+            Today
+          </button>
+          <button type="button" className="btn btn-outline" disabled={loading} onClick={() => void load()}>
+            {loading ? 'Loading…' : 'Refresh'}
+          </button>
+          <button type="button" className="btn btn-outline" disabled={loading || sorted.length === 0} onClick={printOrderList}>
+            Print list
+          </button>
+          <button type="button" className="btn btn-outline" disabled={loading || sorted.length === 0} onClick={exportOrdersCsv}>
+            Export CSV
+          </button>
+        </div>
       </div>
 
-      <p style={{ fontSize: 13, opacity: 0.65, marginBottom: 14 }}>
-        Reprint receipts or kitchen tickets. <strong>Refund</strong> and <strong>change payment</strong> require{' '}
-        <strong>any active employee&apos;s 4-digit passcode</strong> (not only the logged-in user) — the backend
-        should record who verified each action.
-      </p>
-
-      {err && <p className="alert alert-error">{err}</p>}
       {!err && !loading && sorted.length === 0 && (
-        <p className="empty-state">No orders yet.</p>
+        <p className="empty-state">No orders on {historyDayLabel}.</p>
       )}
 
       {sorted.length > 0 && (
@@ -273,7 +373,7 @@ export function OrderHistoryView({
                               style={{ padding: '4px 8px', fontSize: 12 }}
                               onClick={() => openChangePayment(o)}
                             >
-                              Change pay
+                              Change Payment Method
                             </button>
                             <button
                               type="button"
@@ -305,33 +405,21 @@ export function OrderHistoryView({
               Order <strong>{formatOrderDisplay(actionOrder)}</strong> · RM{' '}
               {centsToRM(actionOrder.totalCents)}
             </p>
-            {actionKind === 'refund' && (
-              <p style={{ fontSize: 13 }}>
-                Refunds cannot be undone. Enter the passcode of the employee authorizing this refund (can be
-                different from who is logged in).
-              </p>
-            )}
             {actionKind === 'payment' && (
-              <>
-                <div className="form-group">
-                  <label className="form-label">New payment method</label>
-                  <select
-                    className="form-input form-select"
-                    value={newPaymentCode}
-                    onChange={(e) => setNewPaymentCode(e.target.value)}
-                  >
-                    {paymentMethods.map((p) => (
-                      <option key={p.id} value={p.code}>
-                        {p.label} ({p.code})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <p style={{ fontSize: 13 }}>
-                  Enter the passcode of the employee authorizing this change (can be different from who is logged
-                  in).
-                </p>
-              </>
+              <div className="form-group">
+                <label className="form-label">New payment method</label>
+                <select
+                  className="form-input form-select"
+                  value={newPaymentCode}
+                  onChange={(e) => setNewPaymentCode(e.target.value)}
+                >
+                  {paymentMethods.map((p) => (
+                    <option key={p.id} value={p.code}>
+                      {p.label} ({p.code})
+                    </option>
+                  ))}
+                </select>
+              </div>
             )}
             <div className="form-group">
               <label className="form-label">Employee passcode (4 digits)</label>
@@ -346,11 +434,7 @@ export function OrderHistoryView({
                 autoFocus
               />
             </div>
-            {actionFeedback && (
-              <p className={actionFeedback.ok ? 'alert alert-success' : 'alert alert-error'}>
-                {actionFeedback.text}
-              </p>
-            )}
+            {actionFeedback?.ok && <p className="alert alert-success">{actionFeedback.text}</p>}
             <div className="btn-row">
               <button type="button" className="btn btn-outline" onClick={closeAction} disabled={actionBusy}>
                 Cancel
