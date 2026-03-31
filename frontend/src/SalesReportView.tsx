@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { fetchOrders } from './api'
 import { downloadCsv, toCsvRow } from './csvExport'
-import { escapeHtml, printHtmlDocument } from './printHtml'
 import type { Order, PaymentMethodConfig } from './types'
 import type { SalesReportSummary } from './reportUtils'
 import {
@@ -64,56 +63,6 @@ function exportSalesReportCsv(
     lines.push(toCsvRow([r.name, String(r.quantity), (r.cents / 100).toFixed(2)]))
   }
   downloadCsv(`sales-report-${tag}.csv`, lines)
-}
-
-function printSalesReport(
-  companyName: string,
-  periodLabel: string,
-  summary: SalesReportSummary,
-  centsToRM: (c: number) => string,
-): void {
-  const payBlocks = summary.byPayment
-    .map(
-      (r) =>
-        `<div class="receipt-block"><div class="receipt-item-name">${escapeHtml(r.label)}</div>
-<div class="receipt-line"><span>Orders</span><span>${r.orderCount}</span></div>
-<div class="receipt-line"><span>Total</span><span>RM ${escapeHtml(centsToRM(r.cents))}</span></div></div>`,
-    )
-    .join('<div class="receipt-dash"></div>')
-  const prodBlocks = summary.products
-    .map(
-      (r) =>
-        `<div class="receipt-block"><div class="receipt-item-name">${escapeHtml(r.name)}</div>
-<div class="receipt-line"><span>Qty</span><span>${r.quantity}</span></div>
-<div class="receipt-line"><span>RM</span><span>${escapeHtml(centsToRM(r.cents))}</span></div></div>`,
-    )
-    .join('<div class="receipt-dash"></div>')
-  const addBlocks = summary.addOns
-    .map(
-      (r) =>
-        `<div class="receipt-block"><div class="receipt-item-name">${escapeHtml(r.name)}</div>
-<div class="receipt-line"><span>Qty</span><span>${r.quantity}</span></div>
-<div class="receipt-line"><span>RM</span><span>${escapeHtml(centsToRM(r.cents))}</span></div></div>`,
-    )
-    .join('<div class="receipt-dash"></div>')
-  const html = `<div class="receipt-title">${escapeHtml(companyName || 'SALES REPORT')}</div>
-<div class="receipt-sub">${escapeHtml(periodLabel)}</div>
-<div class="receipt-dash"></div>
-<div class="receipt-line"><span>Sales total</span><span>RM ${escapeHtml(centsToRM(summary.totalSalesCents))}</span></div>
-<div class="receipt-line"><span>Sale orders</span><span>${summary.saleOrderCount}</span></div>
-<div class="receipt-line"><span>Discounts</span><span>RM ${escapeHtml(centsToRM(summary.totalDiscountCents))}</span></div>
-<div class="receipt-line"><span>Refunds</span><span>RM ${escapeHtml(centsToRM(summary.refundTotalCents))}</span></div>
-<div class="receipt-line"><span>Refund orders</span><span>${summary.refundOrderCount}</span></div>
-<div class="receipt-dash"></div>
-<div class="receipt-section">BY PAYMENT</div>
-${payBlocks || '<p class="receipt-muted">None</p>'}
-<div class="receipt-dash"></div>
-<div class="receipt-section">PRODUCTS</div>
-${prodBlocks || '<p class="receipt-muted">None</p>'}
-<div class="receipt-dash"></div>
-<div class="receipt-section">ADD-ONS</div>
-${addBlocks || '<p class="receipt-muted">None</p>'}`
-  printHtmlDocument('Sales report', html)
 }
 
 export function SalesReportView({
@@ -182,14 +131,6 @@ export function SalesReportView({
         <div className="btn-row" style={{ margin: 0 }}>
           <button type="button" className="btn btn-outline" disabled={loading} onClick={() => void load()}>
             {loading ? 'Loading…' : 'Refresh'}
-          </button>
-          <button
-            type="button"
-            className="btn btn-outline"
-            disabled={loading || err !== null}
-            onClick={() => printSalesReport(companyName, fmtRange(from, to), summary, centsToRM)}
-          >
-            Print
           </button>
           <button
             type="button"

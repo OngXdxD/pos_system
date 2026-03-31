@@ -1,21 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { defaultCustomRangeStrings, filterOrdersInRange, parseLocalDateInput } from './reportUtils'
+import { defaultCustomRangeStrings, parseLocalDateInput } from './reportUtils'
 import {
   changeOrderPaymentMethod,
-  fetchOrders,
+  fetchOrdersPage,
   refundOrder,
+  requestOrderThermalPrint,
 } from './api'
 import { formatOrderDisplay } from './orderDisplay'
-import { OrderPrintSlips, type PrintJob } from './OrderPrintSlips'
 import { downloadCsv, toCsvRow } from './csvExport'
 import {
   paymentMethodDetailForApi,
   resolvePaymentMethodLabel,
   toApiPaymentMethod,
 } from './paymentMethodApi'
-import { escapeHtml, printHtmlDocument } from './printHtml'
 import { useToast } from './Toast'
-import type { CompanyInfo, Order, OrderStatus, PaymentMethodConfig } from './types'
+import type { Order, OrderStatus, PaymentMethodConfig } from './types'
 
 function centsToRM(cents: number): string {
   return (cents / 100).toFixed(2)
@@ -27,13 +26,6 @@ function fmt(iso: string): string {
   } catch {
     return iso
   }
-}
-
-function orderLinesSubtotal(order: Order): number {
-  return order.lines.reduce(
-    (s, l) => s + (l.basePrice + l.addOns.reduce((a, x) => a + x.price, 0)) * l.quantity,
-    0,
-  )
 }
 
 const ORDER_STATUS_LABEL: Record<OrderStatus, string> = {
@@ -85,13 +77,14 @@ function resolvePaymentCodeForEdit(o: Order, methods: PaymentMethodConfig[]): st
 
 type ActionKind = 'refund' | 'payment' | null
 
+const PAGE_SIZE = 10
+const EXPORT_PAGE_SIZE = 300
+
 export function OrderHistoryView({
   token,
-  companyInfo,
   paymentMethods,
 }: {
   token: string
-  companyInfo: CompanyInfo
   paymentMethods: PaymentMethodConfig[]
 }) {
   const showToast = useToast()
@@ -99,16 +92,31 @@ export function OrderHistoryView({
   const [historyDay, setHistoryDay] = useState(() => defaultCustomRangeStrings().from)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
-  const [printJob, setPrintJob] = useState<PrintJob | null>(null)
-
   const [actionKind, setActionKind] = useState<ActionKind>(null)
   const [actionOrder, setActionOrder] = useState<Order | null>(null)
   const [newPaymentCode, setNewPaymentCode] = useState('')
   const [passcode, setPasscode] = useState('')
   const [actionBusy, setActionBusy] = useState(false)
   const [actionFeedback, setActionFeedback] = useState<{ ok: boolean; text: string } | null>(null)
+  const [thermalSlipBusy, setThermalSlipBusy] = useState(false)
+  const [page, setPage] = useState(0)
+  const [totalCount, setTotalCount] = useState<number | null>(null)
+  const [exportBusy, setExportBusy] = useState(false)
 
-  const finishPrint = useCallback(() => setPrintJob(null), [])
+  const handleThermalSlipPrint = useCallback(
+    async (o: Order, variant: 'receipt' | 'kitchen') => {
+      try {
+        setThermalSlipBusy(true)
+        await requestOrderThermalPrint(o.id, token, variant)
+        showToast('Server print requested.', 'success')
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Server print failed', 'error')
+      } finally {
+        setThermalSlipBusy(false)
+      }
+    },
+    [showToast, token],
+  )
 
   const load = useCallback(async () => {
     const fromD = parseLocalDateInput(historyDay, false)
@@ -116,21 +124,28 @@ export function OrderHistoryView({
     try {
       setLoading(true)
       setErr(null)
-      const list = await fetchOrders(token, {
+      const { orders: list, total } = await fetchOrdersPage(token, {
         from: fromD.toISOString(),
         to: toD.toISOString(),
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE,
       })
-      setOrders(filterOrdersInRange(list, fromD, toD))
+      setOrders(list)
+      setTotalCount(total)
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Failed to load orders')
     } finally {
       setLoading(false)
     }
-  }, [token, historyDay])
+  }, [token, historyDay, page])
 
   useEffect(() => {
     void load()
   }, [load])
+
+  useEffect(() => {
+    setPage(0)
+  }, [historyDay])
 
   useEffect(() => {
     if (err) showToast(err, 'error')
@@ -156,31 +171,6 @@ export function OrderHistoryView({
     setActionOrder(null)
     setPasscode('')
     setActionFeedback(null)
-  }
-
-  function buildPrintJob(
-    o: Order,
-    variant: 'receipt' | 'kitchen',
-  ): PrintJob {
-    const sub = orderLinesSubtotal(o)
-    const disc = o.discountCents ?? 0
-    const tender = o.tenderCents
-    const change =
-      o.changeDueCents ??
-      (tender != null ? Math.max(0, tender - o.totalCents) : undefined)
-    return {
-      order: o,
-      company: companyInfo,
-      paymentLabel: resolvePaymentMethodLabel(paymentMethods, {
-        paymentMethod: o.paymentMethod,
-        paymentMethodDetail: o.paymentMethodDetail,
-      }),
-      subtotalCents: sub,
-      discountCents: disc,
-      variant,
-      tenderCents: tender,
-      changeCents: change,
-    }
   }
 
   async function submitAction() {
@@ -229,56 +219,73 @@ export function OrderHistoryView({
   const historyDayLabel = useMemo(() => formatHistoryDayLabel(historyDay), [historyDay])
   const isToday = historyDay === localTodayYmd()
 
-  function exportOrdersCsv() {
-    const lines = [
-      toCsvRow(['Order', 'Created (ISO)', 'Total (RM)', 'Status', 'Payment', 'Order ID']),
-    ]
-    for (const o of sorted) {
-      lines.push(
-        toCsvRow([
-          formatOrderDisplay(o),
-          o.createdAt,
-          centsToRM(o.totalCents),
-          orderStatusLabel(o.status),
-          resolvePaymentMethodLabel(paymentMethods, {
-            paymentMethod: o.paymentMethod,
-            paymentMethodDetail: o.paymentMethodDetail,
-          }),
-          o.id,
-        ]),
-      )
+  const hasPrev = page > 0
+  const hasNext =
+    totalCount != null ? (page + 1) * PAGE_SIZE < totalCount : sorted.length === PAGE_SIZE
+  const rangeLabel = (() => {
+    if (sorted.length > 0) {
+      if (totalCount != null) {
+        return `Showing ${page * PAGE_SIZE + 1}–${page * PAGE_SIZE + sorted.length} of ${totalCount}`
+      }
+      const more = sorted.length === PAGE_SIZE ? ' · more may exist' : ''
+      return `Page ${page + 1} · ${sorted.length} order${sorted.length === 1 ? '' : 's'}${more}`
     }
-    downloadCsv(`orders-${historyDay}.csv`, lines)
-  }
+    if (page > 0) return `Page ${page + 1} (empty)`
+    return ''
+  })()
 
-  function printOrderList() {
-    const co = companyInfo.companyName?.trim() || 'Order history'
-    const blocks = sorted
-      .map((o) => {
-        const pay = resolvePaymentMethodLabel(paymentMethods, {
-          paymentMethod: o.paymentMethod,
-          paymentMethodDetail: o.paymentMethodDetail,
+  async function exportOrdersCsv() {
+    const fromD = parseLocalDateInput(historyDay, false)
+    const toD = parseLocalDateInput(historyDay, true)
+    const from = fromD.toISOString()
+    const to = toD.toISOString()
+    try {
+      setExportBusy(true)
+      const all: Order[] = []
+      let offset = 0
+      for (let guard = 0; guard < 500; guard++) {
+        const { orders: chunk } = await fetchOrdersPage(token, {
+          from,
+          to,
+          limit: EXPORT_PAGE_SIZE,
+          offset,
         })
-        return `<div class="receipt-block">
-<div class="receipt-line"><span>Order</span><span>${escapeHtml(formatOrderDisplay(o))}</span></div>
-<div class="receipt-line"><span>Time</span><span>${escapeHtml(fmt(o.createdAt))}</span></div>
-<div class="receipt-line"><span>Total</span><span>RM ${escapeHtml(centsToRM(o.totalCents))}</span></div>
-<div class="receipt-line"><span>Status</span><span>${escapeHtml(orderStatusLabel(o.status))}</span></div>
-<div class="receipt-line"><span>Pay</span><span>${escapeHtml(pay)}</span></div>
-</div><div class="receipt-dash"></div>`
-      })
-      .join('')
-    const html = `<div class="receipt-title">${escapeHtml(co)}</div>
-<div class="receipt-sub">${escapeHtml(historyDayLabel)} · ${sorted.length} order(s)</div>
-<div class="receipt-dash"></div>
-${blocks || '<p class="receipt-muted">No orders</p>'}`
-    printHtmlDocument('Order history', html)
+        all.push(...chunk)
+        if (chunk.length < EXPORT_PAGE_SIZE) break
+        offset += EXPORT_PAGE_SIZE
+      }
+      const sortedExport = [...all].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      )
+      const lines = [
+        toCsvRow(['Order', 'Created (ISO)', 'Total (RM)', 'Status', 'Payment', 'Order ID']),
+      ]
+      for (const o of sortedExport) {
+        lines.push(
+          toCsvRow([
+            formatOrderDisplay(o),
+            o.createdAt,
+            centsToRM(o.totalCents),
+            orderStatusLabel(o.status),
+            resolvePaymentMethodLabel(paymentMethods, {
+              paymentMethod: o.paymentMethod,
+              paymentMethodDetail: o.paymentMethodDetail,
+            }),
+            o.id,
+          ]),
+        )
+      }
+      downloadCsv(`orders-${historyDay}.csv`, lines)
+      showToast(`Exported ${sortedExport.length} order(s).`, 'success')
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Export failed', 'error')
+    } finally {
+      setExportBusy(false)
+    }
   }
 
   return (
     <div className="card span-full">
-      <OrderPrintSlips job={printJob} onAfterPrint={finishPrint} />
-
       <div className="section-header">
         <h2 className="section-title">Order history</h2>
         <div className="btn-row" style={{ margin: 0, flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
@@ -304,17 +311,23 @@ ${blocks || '<p class="receipt-muted">No orders</p>'}`
           <button type="button" className="btn btn-outline" disabled={loading} onClick={() => void load()}>
             {loading ? 'Loading…' : 'Refresh'}
           </button>
-          <button type="button" className="btn btn-outline" disabled={loading || sorted.length === 0} onClick={printOrderList}>
-            Print list
-          </button>
-          <button type="button" className="btn btn-outline" disabled={loading || sorted.length === 0} onClick={exportOrdersCsv}>
-            Export CSV
+          <button
+            type="button"
+            className="btn btn-outline"
+            disabled={loading || exportBusy}
+            onClick={() => void exportOrdersCsv()}
+          >
+            {exportBusy ? 'Exporting…' : 'Export CSV'}
           </button>
         </div>
       </div>
 
-      {!err && !loading && sorted.length === 0 && (
+      {!err && !loading && sorted.length === 0 && page === 0 && (
         <p className="empty-state">No orders on {historyDayLabel}.</p>
+      )}
+
+      {!err && !loading && sorted.length === 0 && page > 0 && (
+        <p className="empty-state">No orders on this page. Try the previous page.</p>
       )}
 
       {sorted.length > 0 && (
@@ -353,7 +366,8 @@ ${blocks || '<p class="receipt-muted">No orders</p>'}`
                           type="button"
                           className="btn btn-outline"
                           style={{ padding: '4px 8px', fontSize: 12 }}
-                          onClick={() => setPrintJob(buildPrintJob(o, 'receipt'))}
+                          disabled={thermalSlipBusy}
+                          onClick={() => void handleThermalSlipPrint(o, 'receipt')}
                         >
                           Receipt
                         </button>
@@ -361,7 +375,8 @@ ${blocks || '<p class="receipt-muted">No orders</p>'}`
                           type="button"
                           className="btn btn-outline"
                           style={{ padding: '4px 8px', fontSize: 12 }}
-                          onClick={() => setPrintJob(buildPrintJob(o, 'kitchen'))}
+                          disabled={thermalSlipBusy}
+                          onClick={() => void handleThermalSlipPrint(o, 'kitchen')}
                         >
                           Kitchen
                         </button>
@@ -392,6 +407,28 @@ ${blocks || '<p class="receipt-muted">No orders</p>'}`
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {(sorted.length > 0 || page > 0) && (
+        <div className="order-history-pagination" aria-label="Order list pages">
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            disabled={loading || !hasPrev}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+          >
+            Previous
+          </button>
+          <span className="order-history-page-meta">{rangeLabel}</span>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            disabled={loading || !hasNext}
+            onClick={() => setPage((p) => p + 1)}
+          >
+            Next
+          </button>
         </div>
       )}
 

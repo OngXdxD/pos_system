@@ -55,6 +55,15 @@ export interface CompanyInfo {
   contactNumber: string;
   address: string;
   email: string;
+  /** Persisted via GET/PUT `/company` for receipt layout (58mm vs 80mm). */
+  thermalPaperWidth?: '58' | '80';
+  /** Cashier method `code` from Settings payment methods; pre-selected on Take Order. */
+  defaultPaymentMethodCode?: string;
+  /**
+   * Windows print queue name (exact string from Printers & scanners) or similar OS identifier.
+   * Backend can persist and use when sending raw/ESC-POS jobs; browsers cannot pick USB devices.
+   */
+  thermalPrinterQueueName?: string;
 }
 
 /** Super-admin configured payment options; `code` is sent to POST /api/orders */

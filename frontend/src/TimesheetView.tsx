@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { fetchAllTimeEntries, fetchTimeEntries } from './api'
 import { downloadCsv, toCsvRow } from './csvExport'
 import { buildIdToNameMap, timesheetEmployeeDisplayName } from './employeeDisplay'
-import { escapeHtml, printHtmlDocument } from './printHtml'
 import { useToast } from './Toast'
 import type { Employee, TimeEntry } from './types'
 
@@ -117,33 +116,6 @@ export function TimesheetView({
     }
   }
 
-  function printList() {
-    const title = isAdmin ? 'TIMESHEET (ALL)' : 'MY TIMESHEET'
-    const sub = isAdmin ? `${sorted.length} entries` : `${sorted.length} entries`
-    const blocks = sorted
-      .map((e) => {
-        if (isAdmin) {
-          return `<div class="receipt-block">
-<div class="receipt-line"><span>Staff</span><span>${escapeHtml(rowName(e))}</span></div>
-<div class="receipt-line"><span>In</span><span>${escapeHtml(fmt(e.clockInAt))}</span></div>
-<div class="receipt-line"><span>Out</span><span>${escapeHtml(fmt(e.clockOutAt))}</span></div>
-<div class="receipt-line"><span>Duration</span><span>${escapeHtml(durationLabel(e.clockInAt, e.clockOutAt))}</span></div>
-</div><div class="receipt-dash"></div>`
-        }
-        return `<div class="receipt-block">
-<div class="receipt-line"><span>In</span><span>${escapeHtml(fmt(e.clockInAt))}</span></div>
-<div class="receipt-line"><span>Out</span><span>${escapeHtml(fmt(e.clockOutAt))}</span></div>
-<div class="receipt-line"><span>Duration</span><span>${escapeHtml(durationLabel(e.clockInAt, e.clockOutAt))}</span></div>
-</div><div class="receipt-dash"></div>`
-      })
-      .join('')
-    const html = `<div class="receipt-title">${escapeHtml(title)}</div>
-<div class="receipt-sub">${escapeHtml(sub)}</div>
-<div class="receipt-dash"></div>
-${blocks || '<p class="receipt-muted">No entries</p>'}`
-    printHtmlDocument(title, html)
-  }
-
   return (
     <div className="card span-full timesheet-page">
       <div className="section-header">
@@ -151,9 +123,6 @@ ${blocks || '<p class="receipt-muted">No entries</p>'}`
         <div className="btn-row" style={{ margin: 0 }}>
           <button type="button" className="btn btn-outline" disabled={loading} onClick={() => void load()}>
             {loading ? 'Loading…' : 'Refresh'}
-          </button>
-          <button type="button" className="btn btn-outline" disabled={loading || sorted.length === 0} onClick={printList}>
-            Print
           </button>
           <button type="button" className="btn btn-outline" disabled={loading || sorted.length === 0} onClick={exportCsv}>
             Export CSV

@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { fetchMenuItems, placeOrder } from './api'
-import { paymentMethodDetailForApi, resolvePaymentMethodLabel, toApiPaymentMethod } from './paymentMethodApi'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { fetchMenuItems, placeOrder, requestOrderThermalPrint } from './api'
+import { paymentMethodDetailForApi, toApiPaymentMethod } from './paymentMethodApi'
 import { formatLineAddOnsSummary, formatOrderDisplay } from './orderDisplay'
-import { OrderPrintSlips, type PrintJob } from './OrderPrintSlips'
 import { useToast } from './Toast'
-import type { AddOnGroup, CompanyInfo, MenuItem, OrderLine, OrderLineAddOn, PaymentMethodConfig } from './types'
+import type { AddOnGroup, MenuItem, Order, OrderLine, OrderLineAddOn, PaymentMethodConfig } from './types'
 
 function centsToRM(cents: number): string {
   return (cents / 100).toFixed(2)
@@ -375,10 +374,11 @@ export interface TakeOrderViewProps {
   onMenuRefresh: (items: MenuItem[]) => void
   employeeId: string
   token: string
-  companyInfo: CompanyInfo
   paymentMethods: PaymentMethodConfig[]
   /** From Settings: whether POST /orders should ask API for COMPLETED vs PENDING. */
   autoCompleteNewOrders: boolean
+  /** From Settings: payment method `code` to pre-select; empty = first in list. */
+  defaultPaymentMethodCode: string
 }
 
 export function TakeOrderView({
@@ -386,16 +386,16 @@ export function TakeOrderView({
   onMenuRefresh,
   employeeId,
   token,
-  companyInfo,
   paymentMethods,
   autoCompleteNewOrders,
+  defaultPaymentMethodCode,
 }: TakeOrderViewProps) {
   const showToast = useToast()
   const [cart, setCart] = useState<OrderLine[]>([])
   const [modalCtx, setModalCtx] = useState<ModalCtx | null>(null)
   const [isPlacing, setIsPlacing] = useState(false)
-  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null)
-  const [printJob, setPrintJob] = useState<PrintJob | null>(null)
+  const [lastPlacedOrder, setLastPlacedOrder] = useState<Order | null>(null)
+  const [reprintBusy, setReprintBusy] = useState(false)
 
   const [discountMode, setDiscountMode] = useState<DiscountMode>('none')
   const [discountInput, setDiscountInput] = useState('')
@@ -403,13 +403,21 @@ export function TakeOrderView({
   const [cashShowCustomInput, setCashShowCustomInput] = useState(false)
   const tenderInputRef = useRef<HTMLInputElement>(null)
 
-  const firstCode = paymentMethods[0]?.code ?? 'CASH'
-  const [paymentCode, setPaymentCode] = useState(firstCode)
+  const preferredCode = useMemo(() => {
+    if (
+      defaultPaymentMethodCode.trim() &&
+      paymentMethods.some((p) => p.code === defaultPaymentMethodCode.trim())
+    ) {
+      return defaultPaymentMethodCode.trim()
+    }
+    return paymentMethods[0]?.code ?? 'CASH'
+  }, [paymentMethods, defaultPaymentMethodCode])
+
+  const [paymentCode, setPaymentCode] = useState(preferredCode)
 
   useEffect(() => {
-    if (paymentMethods.some((p) => p.code === paymentCode)) return
-    setPaymentCode(firstCode)
-  }, [paymentMethods, paymentCode, firstCode])
+    setPaymentCode(preferredCode)
+  }, [preferredCode])
 
   useEffect(() => {
     if (paymentCode.toUpperCase() !== 'CASH') {
@@ -501,16 +509,11 @@ export function TakeOrderView({
 
   function clearCart() {
     setCart([])
-    setMsg(null)
     setDiscountMode('none')
     setDiscountInput('')
     setTenderInput('')
     setCashShowCustomInput(false)
   }
-
-  const finishPrint = useCallback(() => {
-    setPrintJob(null)
-  }, [])
 
   async function handlePlaceOrder() {
     if (cart.length === 0) return
@@ -533,7 +536,6 @@ export function TakeOrderView({
     }
     try {
       setIsPlacing(true)
-      setMsg(null)
       const apiPay = toApiPaymentMethod(paymentCode)
       const detail = paymentMethodDetailForApi(paymentCode, apiPay)
       const placed = await placeOrder(
@@ -544,6 +546,7 @@ export function TakeOrderView({
           discountCents: discountCents > 0 ? discountCents : undefined,
           tenderCents: isCashPayment ? tenderCentsParsed : undefined,
           autoCompleteNewOrders,
+          printThermal: true,
           lines: cart.map(({ menuItemId, menuItemName, basePrice, addOns, quantity }) => ({
             menuItemId,
             menuItemName,
@@ -554,35 +557,13 @@ export function TakeOrderView({
         },
         token,
       )
-      const payLabel = resolvePaymentMethodLabel(paymentMethods, {
-        paymentMethod: placed.paymentMethod,
-        paymentMethodDetail: placed.paymentMethodDetail,
-        cashierCode: paymentCode,
-      })
-      const tenderFinal = placed.tenderCents ?? (isCashPayment ? tenderCentsParsed : undefined)
-      const changeFinal =
-        isCashPayment
-          ? (placed.changeDueCents ?? Math.max(0, (tenderFinal ?? 0) - placed.totalCents))
-          : undefined
-      setPrintJob({
-        order: placed,
-        company: companyInfo,
-        paymentLabel: payLabel,
-        subtotalCents,
-        discountCents,
-        variant: 'both',
-        tenderCents: tenderFinal,
-        changeCents: changeFinal,
-      })
+      setLastPlacedOrder(placed)
+      showToast('Order placed. Receipt and kitchen slip print on the server.', 'success')
       setCart([])
       setDiscountMode('none')
       setDiscountInput('')
       setTenderInput('')
       setCashShowCustomInput(false)
-      setMsg({
-        text: `Order ${formatOrderDisplay(placed)} placed. Printing receipt & kitchen ticket…`,
-        ok: true,
-      })
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to place order', 'error')
     } finally {
@@ -592,8 +573,6 @@ export function TakeOrderView({
 
   return (
     <div className="order-layout">
-      <OrderPrintSlips job={printJob} onAfterPrint={finishPrint} />
-
       <div className="order-menu-panel">
         <div className="section-header">
           <h2 className="section-title">Menu</h2>
@@ -637,7 +616,7 @@ export function TakeOrderView({
           )}
         </div>
 
-        {cart.length === 0 && !msg && (
+        {cart.length === 0 && (
           <p className="empty-state" style={{ padding: '40px 16px' }}>
             Tap a menu item to start building an order.
           </p>
@@ -806,15 +785,36 @@ export function TakeOrderView({
               disabled={isPlacing || paymentMethods.length === 0}
               onClick={handlePlaceOrder}
             >
-              {isPlacing ? 'Placing Order…' : 'Place Order & Print'}
+              {isPlacing ? 'Placing order…' : 'Place order'}
             </button>
           </div>
         )}
 
-        {msg?.ok && (
-          <p className="alert alert-success" style={{ marginTop: 12 }}>
-            {msg.text}
-          </p>
+        {lastPlacedOrder && (
+          <div className="cart-reprint-footer">
+            <button
+              type="button"
+              className="btn btn-outline"
+              disabled={reprintBusy}
+              onClick={() => {
+                void (async () => {
+                  try {
+                    setReprintBusy(true)
+                    await requestOrderThermalPrint(lastPlacedOrder.id, token, 'both')
+                    showToast('Reprint sent to server (receipt + kitchen).', 'success')
+                  } catch (err) {
+                    showToast(err instanceof Error ? err.message : 'Server print failed', 'error')
+                  } finally {
+                    setReprintBusy(false)
+                  }
+                })()
+              }}
+            >
+              {reprintBusy
+                ? 'Printing…'
+                : `Reprint last order (${formatOrderDisplay(lastPlacedOrder)})`}
+            </button>
+          </div>
         )}
       </div>
 

@@ -1039,6 +1039,78 @@
   background: rgba(0, 0, 0, 0.05);
 }
 
+.settings-thermal-panel {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.settings-thermal-panel .form-label {
+  color: var(--major-color);
+  font-weight: 600;
+}
+
+/* POS server summary: label + value both use theme major color */
+.settings-pos-readonly {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.settings-pos-readonly p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  margin: 0;
+}
+
+.settings-pos-readonly .settings-pos-label {
+  flex: 0 0 auto;
+  min-width: min(200px, 42%);
+  font-weight: 700;
+  color: var(--major-color);
+  opacity: 0.88;
+}
+
+.settings-pos-readonly .settings-pos-value {
+  flex: 1 1 160px;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--major-color);
+}
+
+.settings-pos-actions {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.settings-thermal-radios {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+}
+
+.settings-thermal-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--major-color);
+}
+
+.settings-thermal-radio input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--major-color);
+  cursor: pointer;
+}
+
 /* Toggle switch */
 .settings-switch {
   position: relative;
@@ -1396,6 +1468,16 @@
   box-shadow: var(--shadow);
   display: flex;
   flex-direction: column;
+}
+
+.cart-reprint-footer {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.cart-reprint-footer .btn {
+  width: 100%;
 }
 
 /* ─── MENU TILE GRID ────────────────────────────────────────── */
@@ -1799,181 +1881,23 @@
   font-size: 13.5px;
 }
 
-/* ─── PRINT: receipt + kitchen (hidden on screen) ───────────── */
-
-@media screen {
-  .print-slip-root {
-    position: fixed;
-    left: -10000px;
-    top: 0;
-    width: 80mm;
-    pointer-events: none;
-    opacity: 0;
-    overflow: hidden;
-  }
-}
-
-@media print {
-  /* 80 mm thermal receipt — choose your receipt printer in the print dialog */
-  @page {
-    size: 80mm auto;
-    margin: 2mm;
-  }
-
-  body * {
-    visibility: hidden;
-  }
-  .print-slip-root,
-  .print-slip-root * {
-    visibility: visible;
-  }
-  .print-slip-root {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 72mm;
-    max-width: 72mm;
-    margin: 0 auto;
-    padding: 0 2mm 3mm;
-    font-size: 9pt;
-    color: #000;
-    background: #fff;
-    word-wrap: break-word;
-    overflow-wrap: anywhere;
-  }
-  .print-kitchen {
-    padding-top: 0;
-    max-width: 72mm;
-  }
-  .print-kitchen.print-kitchen-after-receipt {
-    page-break-before: always;
-    padding-top: 8mm;
-  }
-}
-
-.print-receipt-header {
-  text-align: center;
-  margin-bottom: 8px;
-}
-.print-co-name {
-  font-size: 11pt;
-  margin: 0 0 4px;
-  font-weight: 700;
-}
-.print-co-line {
-  margin: 2px 0;
-  font-size: 8pt;
-}
-.print-co-multiline {
-  white-space: pre-wrap;
-}
-.print-divider {
-  border: none;
-  border-top: 1px dashed #333;
-  margin: 8px 0;
-}
-.print-meta {
-  margin: 3px 0;
-  font-size: 8pt;
-}
-.print-lines {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-.print-line-item {
+.order-history-pagination {
   display: flex;
   flex-wrap: wrap;
-  gap: 2px 6px;
-  margin-bottom: 8px;
-  font-size: 8.5pt;
-  align-items: flex-start;
+  align-items: center;
+  justify-content: center;
+  gap: 12px 20px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
 }
-.print-line-qty {
-  font-weight: 700;
-  flex-shrink: 0;
-}
-.print-line-body {
-  flex: 1;
-  min-width: 0;
-  word-break: break-word;
-}
-.print-line-addons {
-  display: block;
-  font-size: 7.5pt;
-  color: #333;
-}
-.print-line-price {
-  font-weight: 600;
-  flex-basis: 100%;
-  text-align: right;
-  margin-top: 2px;
-  font-size: 8.5pt;
-}
-.print-totals {
-  margin-top: 6px;
-}
-.print-total-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 6px;
-  font-size: 9pt;
-  margin: 3px 0;
-}
-.print-total-row.print-discount {
-  color: #333;
-}
-.print-total-row.print-grand {
-  font-weight: 800;
-  font-size: 10pt;
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid #000;
-}
-.print-total-row.print-change {
-  font-weight: 800;
-  font-size: 10pt;
-}
-.print-thanks {
+
+.order-history-page-meta {
+  font-size: 13px;
+  color: var(--major-color);
+  opacity: 0.88;
   text-align: center;
-  margin-top: 10px;
-  font-size: 9pt;
-}
-.print-kitchen-title {
-  font-size: 11pt;
-  margin: 0 0 6px;
-  text-align: center;
-  letter-spacing: 0.06em;
-}
-.print-kitchen-meta {
-  font-size: 8.5pt;
-  margin: 3px 0;
-}
-.print-kitchen-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-.print-kitchen-item {
-  font-size: 10pt;
-  margin: 10px 0;
-  padding-bottom: 8px;
-  border-bottom: 1px dashed #333;
-}
-.print-kitchen-item:last-child {
-  border-bottom: none;
-}
-.print-kitchen-product {
-  font-weight: 800;
-  line-height: 1.3;
-  word-break: break-word;
-}
-.print-kitchen-addon {
-  font-weight: 600;
-  font-size: 9pt;
-  margin: 3px 0 0 8px;
-  line-height: 1.3;
-  color: #222;
+  min-width: min(280px, 100%);
 }
 
 .cart-line-edit {

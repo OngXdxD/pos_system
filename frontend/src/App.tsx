@@ -9,10 +9,17 @@ import {
   fetchEmployees,
   fetchTimeEntries,
   loginWithPasscode,
+  normalizeCompanyInfo,
   updateCompanyInfo,
 } from './api'
 import { MenuManagementView, loadMenu, saveMenu } from './MenuManagement'
 import { loadAutoCompleteNewOrders, saveAutoCompleteNewOrders } from './autoCompleteOrdersStore'
+import {
+  loadDefaultPaymentMethodCode,
+  saveDefaultPaymentMethodCode,
+} from './defaultPaymentMethodStore'
+import { loadThermalPaperWidth, saveThermalPaperWidth } from './thermalReceiptStore'
+import type { ThermalPaperWidth } from './thermalReceiptStore'
 import { loadPaymentMethods, savePaymentMethods } from './paymentMethodsStore'
 import { OrderHistoryView } from './OrderHistoryView'
 import { SalesReportView } from './SalesReportView'
@@ -76,9 +83,25 @@ function loadCompanyInfoLocal(): CompanyInfo {
   try {
     const raw = window.localStorage.getItem(COMPANY_KEY)
     if (!raw) return { ...EMPTY_COMPANY }
-    return { ...EMPTY_COMPANY, ...(JSON.parse(raw) as Partial<CompanyInfo>) }
+    return normalizeCompanyInfo({ ...EMPTY_COMPANY, ...(JSON.parse(raw) as Record<string, unknown>) })
   } catch {
     return { ...EMPTY_COMPANY }
+  }
+}
+
+function mergeCompanyFromServer(prev: CompanyInfo, server: CompanyInfo): CompanyInfo {
+  return {
+    companyName: server.companyName.trim() ? server.companyName : prev.companyName,
+    registerNumber: server.registerNumber.trim() ? server.registerNumber : prev.registerNumber,
+    contactNumber: server.contactNumber.trim() ? server.contactNumber : prev.contactNumber,
+    address: server.address.trim() ? server.address : prev.address,
+    email: server.email.trim() ? server.email : prev.email,
+    thermalPaperWidth: server.thermalPaperWidth ?? prev.thermalPaperWidth,
+    defaultPaymentMethodCode: server.defaultPaymentMethodCode ?? prev.defaultPaymentMethodCode,
+    thermalPrinterQueueName:
+      server.thermalPrinterQueueName !== undefined
+        ? server.thermalPrinterQueueName?.trim() || undefined
+        : prev.thermalPrinterQueueName,
   }
 }
 
@@ -161,9 +184,24 @@ export default function App() {
   /* ── Payment methods (Super Admin → synced to Take Order) ── */
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethodConfig[]>(() => loadPaymentMethods())
   const [autoCompleteNewOrders, setAutoCompleteNewOrders] = useState(() => loadAutoCompleteNewOrders())
+  const [thermalPaperWidth, setThermalPaperWidth] = useState(() => loadThermalPaperWidth())
+  const [defaultPaymentMethodCode, setDefaultPaymentMethodCode] = useState(() =>
+    loadDefaultPaymentMethodCode(),
+  )
+  const [thermalPrinterQueueName, setThermalPrinterQueueName] = useState(
+    () => loadCompanyInfoLocal().thermalPrinterQueueName ?? '',
+  )
   const [newPayLabel, setNewPayLabel] = useState('')
   const [newPayCode, setNewPayCode] = useState('')
   const [addPaymentMethodOpen, setAddPaymentMethodOpen] = useState(false)
+
+  /** Draft for Settings → POS server fields; non-null only while editing. */
+  const [posSettingsDraft, setPosSettingsDraft] = useState<{
+    thermal: ThermalPaperWidth
+    pay: string
+    queue: string
+  } | null>(null)
+  const [isSavingPosSettings, setIsSavingPosSettings] = useState(false)
 
   const currentUser = session?.user ?? null
   const isAdmin = currentUser?.role === 'SUPER_ADMIN'
@@ -227,17 +265,40 @@ export default function App() {
     saveAutoCompleteNewOrders(autoCompleteNewOrders)
   }, [autoCompleteNewOrders])
 
-  // Fetch company info from backend the first time the company tab is opened
   useEffect(() => {
-    if (activeView !== 'company' || !session || hasLoadedCompany.current) return
+    saveThermalPaperWidth(thermalPaperWidth)
+  }, [thermalPaperWidth])
+
+  useEffect(() => {
+    if (activeView === 'settings') return
+    setPosSettingsDraft(null)
+  }, [activeView])
+
+  // Fetch company (including POS prefs) once per login — merges with local cache
+  useEffect(() => {
+    if (!session) {
+      hasLoadedCompany.current = false
+      return
+    }
+    if (hasLoadedCompany.current) return
     hasLoadedCompany.current = true
     void fetchCompanyInfo(session.token).then((data) => {
-      if (data) {
-        setCompanyInfo(data)
-        setCompanyEdit(data)
+      if (!data) return
+      setCompanyInfo((prev) => mergeCompanyFromServer(prev, data))
+      setCompanyEdit((prev) => mergeCompanyFromServer(prev, data))
+      if (data.thermalPaperWidth) {
+        saveThermalPaperWidth(data.thermalPaperWidth)
+        setThermalPaperWidth(data.thermalPaperWidth)
+      }
+      if (data.defaultPaymentMethodCode !== undefined) {
+        saveDefaultPaymentMethodCode(data.defaultPaymentMethodCode)
+        setDefaultPaymentMethodCode(data.defaultPaymentMethodCode)
+      }
+      if (data.thermalPrinterQueueName !== undefined) {
+        setThermalPrinterQueueName(data.thermalPrinterQueueName ?? '')
       }
     })
-  }, [activeView, session])
+  }, [session])
 
   useEffect(() => {
     const prev = prevActiveView.current
@@ -305,6 +366,7 @@ export default function App() {
     setClockMsg(null)
     setCreatedList([])
     setEmployeeRoster([])
+    hasLoadedCompany.current = false
     window.sessionStorage.removeItem(SESSION_KEY)
     setPin('')
     setActiveView('order')
@@ -406,6 +468,55 @@ export default function App() {
     setThemeMsg('Theme colors saved')
   }
 
+  function beginEditPosSettings() {
+    setPosSettingsDraft({
+      thermal: thermalPaperWidth,
+      pay: defaultPaymentMethodCode,
+      queue: thermalPrinterQueueName,
+    })
+  }
+
+  function cancelEditPosSettings() {
+    setPosSettingsDraft(null)
+  }
+
+  async function savePosSettingsToServer(e?: React.FormEvent) {
+    e?.preventDefault()
+    if (!session || !isAdmin || !posSettingsDraft) return
+    const pay = posSettingsDraft.pay.trim() || undefined
+    const queue = posSettingsDraft.queue.trim() || undefined
+    try {
+      setIsSavingPosSettings(true)
+      const saved = await updateCompanyInfo(
+        {
+          ...companyInfo,
+          thermalPaperWidth: posSettingsDraft.thermal,
+          defaultPaymentMethodCode: pay,
+          thermalPrinterQueueName: queue,
+        },
+        session.token,
+      )
+      setCompanyInfo(saved)
+      setCompanyEdit((prev) => ({ ...prev, ...saved }))
+      const tw = saved.thermalPaperWidth ?? posSettingsDraft.thermal
+      setThermalPaperWidth(tw)
+      saveThermalPaperWidth(tw)
+      const dpm = saved.defaultPaymentMethodCode ?? posSettingsDraft.pay
+      setDefaultPaymentMethodCode(dpm)
+      saveDefaultPaymentMethodCode(dpm)
+      setThermalPrinterQueueName(saved.thermalPrinterQueueName ?? posSettingsDraft.queue)
+      setPosSettingsDraft(null)
+      showToast('POS printer and payment settings saved to the server.', 'success')
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : 'Could not save POS settings to the server',
+        'error',
+      )
+    } finally {
+      setIsSavingPosSettings(false)
+    }
+  }
+
   async function handleSaveCompany(e: React.FormEvent) {
     e.preventDefault()
     if (!session) return
@@ -416,7 +527,15 @@ export default function App() {
     try {
       setIsSavingCompany(true)
       setCompanyMsg(null)
-      const saved = await updateCompanyInfo(companyEdit, session.token)
+      const saved = await updateCompanyInfo(
+        {
+          ...companyEdit,
+          thermalPaperWidth,
+          defaultPaymentMethodCode: defaultPaymentMethodCode.trim() || undefined,
+          thermalPrinterQueueName: thermalPrinterQueueName.trim() || undefined,
+        },
+        session.token,
+      )
       setCompanyInfo(saved)
       setCompanyEdit(saved)
       setCompanyUiMode('summary')
@@ -541,18 +660,14 @@ export default function App() {
             onMenuRefresh={setMenu}
             employeeId={currentUser.id}
             token={session.token}
-            companyInfo={companyInfo}
             paymentMethods={paymentMethods}
             autoCompleteNewOrders={autoCompleteNewOrders}
+            defaultPaymentMethodCode={defaultPaymentMethodCode}
           />
         )}
 
         {activeView === 'orderHistory' && session && (
-          <OrderHistoryView
-            token={session.token}
-            companyInfo={companyInfo}
-            paymentMethods={paymentMethods}
-          />
+          <OrderHistoryView token={session.token} paymentMethods={paymentMethods} />
         )}
 
         {activeView === 'reports' && session && (
@@ -934,6 +1049,148 @@ export default function App() {
                   <span className="settings-switch-slider" aria-hidden />
                   <span className="visually-hidden">Auto-complete new orders</span>
                 </label>
+              </div>
+              <div className="settings-thermal-panel">
+                <p className="settings-option-title">POS printer and Payment</p>
+
+                {!posSettingsDraft ? (
+                  <>
+                    <div className="settings-pos-readonly">
+                      <p>
+                        <span className="settings-pos-label">Paper width</span>
+                        <span className="settings-pos-value">{thermalPaperWidth} mm</span>
+                      </p>
+                      <p>
+                        <span className="settings-pos-label">Printer queue</span>
+                        <span className="settings-pos-value">
+                          {thermalPrinterQueueName.trim() || '— (server env default)'}
+                        </span>
+                      </p>
+                      <p>
+                        <span className="settings-pos-label">Default payment on Take Order</span>
+                        <span className="settings-pos-value">
+                          {!defaultPaymentMethodCode.trim()
+                            ? 'First in list (no default)'
+                            : (() => {
+                                const p = paymentMethods.find(
+                                  (x) => x.code === defaultPaymentMethodCode.trim(),
+                                )
+                                return p ? `${p.label} (${p.code})` : defaultPaymentMethodCode
+                              })()}
+                        </span>
+                      </p>
+                    </div>
+                    <div className="btn-row settings-pos-actions">
+                      <button type="button" className="btn btn-outline" onClick={beginEditPosSettings}>
+                        Edit
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <form
+                    id="pos-settings-server-form"
+                    onSubmit={(e) => {
+                      void savePosSettingsToServer(e)
+                    }}
+                  >
+                    <p className="settings-option-title" style={{ marginBottom: 8 }}>
+                      Thermal receipt paper
+                    </p>
+                    <p className="settings-option-desc" style={{ marginBottom: 10 }}>
+                      Used by the server for receipt and kitchen slip layout (58 mm vs 80 mm).
+                    </p>
+                    <div className="settings-thermal-radios" role="group" aria-label="Thermal paper width">
+                      <label className="settings-thermal-radio">
+                        <input
+                          type="radio"
+                          name="thermal-paper"
+                          checked={posSettingsDraft.thermal === '58'}
+                          onChange={() =>
+                            setPosSettingsDraft((d) => (d ? { ...d, thermal: '58' } : d))
+                          }
+                        />
+                        <span>58 mm</span>
+                      </label>
+                      <label className="settings-thermal-radio">
+                        <input
+                          type="radio"
+                          name="thermal-paper"
+                          checked={posSettingsDraft.thermal === '80'}
+                          onChange={() =>
+                            setPosSettingsDraft((d) => (d ? { ...d, thermal: '80' } : d))
+                          }
+                        />
+                        <span>80 mm</span>
+                      </label>
+                    </div>
+                    <p className="settings-option-title" style={{ margin: '18px 0 6px' }}>
+                      Thermal printer queue
+                    </p>
+                    <p className="settings-option-desc" style={{ marginBottom: 8 }}>
+                      Windows queue name (Printers and scanners), or leave empty for server env only.
+                    </p>
+                    <div className="form-group" style={{ marginBottom: 12 }}>
+                      <label className="form-label" htmlFor="thermal-printer-queue">
+                        Printer queue name
+                      </label>
+                      <input
+                        id="thermal-printer-queue"
+                        type="text"
+                        className="form-input"
+                        value={posSettingsDraft.queue}
+                        onChange={(e) =>
+                          setPosSettingsDraft((d) => (d ? { ...d, queue: e.target.value } : d))
+                        }
+                        placeholder="e.g. EPSON TM-T82 Receipt"
+                        autoComplete="off"
+                      />
+                    </div>
+                    <p className="settings-option-title" style={{ margin: '18px 0 6px' }}>
+                      Default payment method
+                    </p>
+                    <p className="settings-option-desc" style={{ marginBottom: 8 }}>
+                      Pre-selected on Take Order when staff opens the screen.
+                    </p>
+                    <div className="form-group" style={{ marginBottom: 12 }}>
+                      <label className="form-label" htmlFor="default-pay-method">
+                        Method
+                      </label>
+                      <select
+                        id="default-pay-method"
+                        className="form-input form-select"
+                        value={posSettingsDraft.pay}
+                        onChange={(e) =>
+                          setPosSettingsDraft((d) => (d ? { ...d, pay: e.target.value } : d))
+                        }
+                        disabled={paymentMethods.length === 0}
+                      >
+                        <option value="">First in list (no default)</option>
+                        {paymentMethods.map((p) => (
+                          <option key={p.id} value={p.code}>
+                            {p.label} ({p.code})
+                          </option>
+                        ))}
+                      </select>
+                      {paymentMethods.length === 0 && (
+                        <p className="settings-empty-hint" style={{ marginTop: 8 }}>
+                          Add payment methods below first.
+                        </p>
+                      )}
+                    </div>
+                    <div className="btn-row settings-pos-actions">
+                      <button type="button" className="btn btn-outline" onClick={cancelEditPosSettings}>
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        className="btn btn-primary"
+                        disabled={isSavingPosSettings}
+                      >
+                        {isSavingPosSettings ? 'Saving…' : 'Save to server'}
+                      </button>
+                    </div>
+                  </form>
+                )}
               </div>
             </div>
 
