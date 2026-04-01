@@ -1,9 +1,31 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { fetchMenuItems, placeOrder, requestOrderThermalPrint } from './api'
+import type { PlaceOrderPayload } from './api'
+import {
+  fetchMenuItems,
+  isAbortError,
+  placeOrder,
+  requestOrderThermalPrintWithTimeout,
+  THERMAL_PRINT_INTERACTIVE_TIMEOUT_MS,
+  THERMAL_PRINT_TIMEOUT_MS,
+} from './api'
+import { addPendingPlace } from './offline/db'
+import { useOffline } from './offline/OfflineContext'
+import { buildOfflineOrderRecord } from './offline/localPlaceOrder'
+import { OrderPrintSlips, type PrintJob } from './OrderPrintSlips'
+import { buildBrowserPrintJob } from './printJobFromOrder'
 import { paymentMethodDetailForApi, toApiPaymentMethod } from './paymentMethodApi'
+import type { ThermalPaperWidth } from './thermalReceiptStore'
 import { formatLineAddOnsSummary, formatOrderDisplay } from './orderDisplay'
 import { useToast } from './Toast'
-import type { AddOnGroup, MenuItem, Order, OrderLine, OrderLineAddOn, PaymentMethodConfig } from './types'
+import type {
+  AddOnGroup,
+  CompanyInfo,
+  MenuItem,
+  Order,
+  OrderLine,
+  OrderLineAddOn,
+  PaymentMethodConfig,
+} from './types'
 
 function centsToRM(cents: number): string {
   return (cents / 100).toFixed(2)
@@ -53,6 +75,19 @@ function visibleAddonGroups(item: MenuItem): AddOnGroup[] {
 function lineTotal(line: OrderLine): number {
   const addOnTotal = line.addOns.reduce((s, a) => s + a.price, 0)
   return (line.basePrice + addOnTotal) * line.quantity
+}
+
+function isInsideTextareaOrContentEditable(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false
+  return !!target.closest('textarea, [contenteditable="true"]')
+}
+
+/** Space should not steal menu / preset / place-button activation. */
+function shouldIgnoreSpacePlaceShortcut(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return true
+  return !!target.closest(
+    'input, textarea, select, [contenteditable="true"], button, [role="button"], a[href]',
+  )
 }
 
 function canEditLine(line: OrderLine, menu: MenuItem[]): boolean {
@@ -379,6 +414,8 @@ export interface TakeOrderViewProps {
   autoCompleteNewOrders: boolean
   /** From Settings: payment method `code` to pre-select; empty = first in list. */
   defaultPaymentMethodCode: string
+  companyInfo: CompanyInfo
+  thermalPaperWidth: ThermalPaperWidth
 }
 
 export function TakeOrderView({
@@ -389,19 +426,24 @@ export function TakeOrderView({
   paymentMethods,
   autoCompleteNewOrders,
   defaultPaymentMethodCode,
+  companyInfo,
+  thermalPaperWidth,
 }: TakeOrderViewProps) {
   const showToast = useToast()
+  const { online, refreshPendingCount } = useOffline()
   const [cart, setCart] = useState<OrderLine[]>([])
   const [modalCtx, setModalCtx] = useState<ModalCtx | null>(null)
   const [isPlacing, setIsPlacing] = useState(false)
   const [lastPlacedOrder, setLastPlacedOrder] = useState<Order | null>(null)
   const [reprintBusy, setReprintBusy] = useState(false)
+  const [printJob, setPrintJob] = useState<PrintJob | null>(null)
 
   const [discountMode, setDiscountMode] = useState<DiscountMode>('none')
   const [discountInput, setDiscountInput] = useState('')
   const [tenderInput, setTenderInput] = useState('')
   const [cashShowCustomInput, setCashShowCustomInput] = useState(false)
   const tenderInputRef = useRef<HTMLInputElement>(null)
+  const placeOrderInFlightRef = useRef(false)
 
   const preferredCode = useMemo(() => {
     if (
@@ -433,10 +475,10 @@ export function TakeOrderView({
   }, [paymentCode, cashShowCustomInput])
 
   useEffect(() => {
-    if (menu.length === 0) {
+    if (menu.length === 0 && online) {
       void fetchMenuItems(token).then((items) => onMenuRefresh(items)).catch(() => {})
     }
-  }, [menu.length, token, onMenuRefresh])
+  }, [menu.length, token, onMenuRefresh, online])
 
   const subtotalCents = useMemo(() => cart.reduce((s, l) => s + lineTotal(l), 0), [cart])
 
@@ -516,6 +558,7 @@ export function TakeOrderView({
   }
 
   async function handlePlaceOrder() {
+    if (placeOrderInFlightRef.current) return
     if (cart.length === 0) return
     if (paymentMethods.length === 0) {
       showToast('No payment methods configured. Add them in Settings.', 'error')
@@ -534,42 +577,107 @@ export function TakeOrderView({
         return
       }
     }
+    placeOrderInFlightRef.current = true
     try {
       setIsPlacing(true)
       const apiPay = toApiPaymentMethod(paymentCode)
       const detail = paymentMethodDetailForApi(paymentCode, apiPay)
-      const placed = await placeOrder(
-        {
-          employeeId,
-          paymentMethod: apiPay,
-          paymentMethodDetail: detail,
-          discountCents: discountCents > 0 ? discountCents : undefined,
-          tenderCents: isCashPayment ? tenderCentsParsed : undefined,
-          autoCompleteNewOrders,
-          printThermal: true,
-          lines: cart.map(({ menuItemId, menuItemName, basePrice, addOns, quantity }) => ({
-            menuItemId,
-            menuItemName,
-            basePrice,
-            addOns,
-            quantity,
-          })),
-        },
-        token,
-      )
+      const linePayload = cart.map(({ menuItemId, menuItemName, basePrice, addOns, quantity }) => ({
+        menuItemId,
+        menuItemName,
+        basePrice,
+        addOns,
+        quantity,
+      }))
+      const payload: PlaceOrderPayload = {
+        employeeId,
+        paymentMethod: apiPay,
+        paymentMethodDetail: detail,
+        discountCents: discountCents > 0 ? discountCents : undefined,
+        tenderCents: isCashPayment ? tenderCentsParsed : undefined,
+        autoCompleteNewOrders,
+        /** Save order first; print via `/print` so a stuck printer does not block checkout. */
+        printThermal: false,
+        lines: linePayload,
+      }
+
+      if (!online) {
+        const record = buildOfflineOrderRecord(employeeId, { ...payload, printThermal: false })
+        await addPendingPlace(record)
+        await refreshPendingCount()
+        setLastPlacedOrder(record.order)
+        setPrintJob(
+          buildBrowserPrintJob(record.order, companyInfo, paymentMethods, 'both-split'),
+        )
+        showToast('Saved offline. It will sync when you are back online.', 'success')
+        clearCart()
+        return
+      }
+
+      const placed = await placeOrder(payload, token)
       setLastPlacedOrder(placed)
-      showToast('Order placed. Receipt and kitchen slip print on the server.', 'success')
+      showToast('Order placed.', 'success')
       setCart([])
       setDiscountMode('none')
       setDiscountInput('')
       setTenderInput('')
       setCashShowCustomInput(false)
+
+      void requestOrderThermalPrintWithTimeout(
+        placed.id,
+        token,
+        'both',
+        THERMAL_PRINT_TIMEOUT_MS,
+      ).catch((err) => {
+        setPrintJob(buildBrowserPrintJob(placed, companyInfo, paymentMethods, 'both-split'))
+        showToast(
+          isAbortError(err)
+            ? 'Thermal printer not responding — opening browser print for receipt + kitchen.'
+            : `${err instanceof Error ? err.message : 'Thermal print failed'} — opening browser print.`,
+          'info',
+        )
+      })
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to place order', 'error')
     } finally {
+      placeOrderInFlightRef.current = false
       setIsPlacing(false)
     }
   }
+
+  const handlePlaceOrderRef = useRef(handlePlaceOrder)
+  handlePlaceOrderRef.current = handlePlaceOrder
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (modalCtx) {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          setModalCtx(null)
+        }
+        return
+      }
+
+      const ctrlEnter = e.key === 'Enter' && (e.ctrlKey || e.metaKey)
+      const space = e.key === ' ' || e.code === 'Space'
+      if (!ctrlEnter && !space) return
+      if (e.repeat) return
+
+      if (ctrlEnter) {
+        if (isInsideTextareaOrContentEditable(e.target)) return
+        e.preventDefault()
+        void handlePlaceOrderRef.current()
+        return
+      }
+
+      if (shouldIgnoreSpacePlaceShortcut(e.target)) return
+      e.preventDefault()
+      void handlePlaceOrderRef.current()
+    }
+
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [modalCtx])
 
   return (
     <div className="order-layout">
@@ -653,7 +761,7 @@ export function TakeOrderView({
                 onChange={(e) => setDiscountMode(e.target.value as DiscountMode)}
               >
                 <option value="none">No discount</option>
-                <option value="fixed">Fixed amount (RM)</option>
+                <option value="fixed">Amount (RM)</option>
                 <option value="percent">Percent (%)</option>
               </select>
             </div>
@@ -667,7 +775,7 @@ export function TakeOrderView({
                   className="form-input"
                   type="number"
                   min="0"
-                  step={discountMode === 'fixed' ? '0.01' : '1'}
+                  step={discountMode === 'fixed' ? '1' : '1'}
                   placeholder={discountMode === 'fixed' ? '0.00' : '0'}
                   value={discountInput}
                   onChange={(e) => setDiscountInput(e.target.value)}
@@ -787,6 +895,12 @@ export function TakeOrderView({
             >
               {isPlacing ? 'Placing order…' : 'Place order'}
             </button>
+            <p className="take-order-shortcuts-hint">
+              <kbd>Space</kbd> place order when focus is not in a field or on a button ·{' '}
+              <kbd>Ctrl</kbd>+<kbd>Enter</kbd> place from amount / payment fields (<kbd>⌘</kbd>+
+              <kbd>Enter</kbd> on Mac) ·{' '}
+              <kbd>Esc</kbd> close add-ons
+            </p>
           </div>
         )}
 
@@ -798,12 +912,42 @@ export function TakeOrderView({
               disabled={reprintBusy}
               onClick={() => {
                 void (async () => {
+                  const isLocal = lastPlacedOrder.id.startsWith('local:')
+                  if (isLocal || !online) {
+                    setPrintJob(
+                      buildBrowserPrintJob(
+                        lastPlacedOrder,
+                        companyInfo,
+                        paymentMethods,
+                        'both-split',
+                      ),
+                    )
+                    return
+                  }
                   try {
                     setReprintBusy(true)
-                    await requestOrderThermalPrint(lastPlacedOrder.id, token, 'both')
+                    await requestOrderThermalPrintWithTimeout(
+                      lastPlacedOrder.id,
+                      token,
+                      'both',
+                      THERMAL_PRINT_INTERACTIVE_TIMEOUT_MS,
+                    )
                     showToast('Reprint sent to server (receipt + kitchen).', 'success')
                   } catch (err) {
-                    showToast(err instanceof Error ? err.message : 'Server print failed', 'error')
+                    setPrintJob(
+                      buildBrowserPrintJob(
+                        lastPlacedOrder,
+                        companyInfo,
+                        paymentMethods,
+                        'both-split',
+                      ),
+                    )
+                    showToast(
+                      isAbortError(err)
+                        ? 'Thermal printer not responding — use the browser print dialog instead.'
+                        : `${err instanceof Error ? err.message : 'Server print failed'} — use the browser print dialog.`,
+                      'info',
+                    )
                   } finally {
                     setReprintBusy(false)
                   }
@@ -827,6 +971,12 @@ export function TakeOrderView({
           onClose={() => setModalCtx(null)}
         />
       )}
+
+      <OrderPrintSlips
+        job={printJob}
+        paperWidth={thermalPaperWidth}
+        onAfterPrint={() => setPrintJob(null)}
+      />
     </div>
   )
 }

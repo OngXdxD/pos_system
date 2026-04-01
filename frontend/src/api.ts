@@ -318,6 +318,11 @@ export type PlaceOrderPayload = {
   autoCompleteNewOrders?: boolean;
   /** When true (always sent by the POS client), backend prints receipt + kitchen per BACKEND_HANDOFF §9b/§9c. */
   printThermal?: boolean;
+  /**
+   * When set (e.g. offline replay `OFF-AB12`), backend should persist and echo this public order label
+   * so receipts and history match what staff saw before sync.
+   */
+  orderNumber?: string;
 };
 
 export async function placeOrder(payload: PlaceOrderPayload, token: string): Promise<Order> {
@@ -331,17 +336,54 @@ export async function placeOrder(payload: PlaceOrderPayload, token: string): Pro
 
 export type OrderThermalPrintVariant = 'receipt' | 'kitchen' | 'both';
 
+export function isAbortError(e: unknown): boolean {
+  if (e instanceof DOMException && e.name === 'AbortError') return true;
+  if (e instanceof Error && e.name === 'AbortError') return true;
+  if (e instanceof Error && /The user aborted a request|aborted a request|AbortError/i.test(e.message))
+    return true;
+  return false;
+}
+
+/**
+ * Background print after checkout (`variant: both` = receipt + kitchen). USB/spooler often needs
+ * many seconds before the HTTP response returns; too short a timeout falsely triggers browser print.
+ * Still capped so a totally stuck handler does not hold a connection forever.
+ */
+export const THERMAL_PRINT_TIMEOUT_MS = 45_000;
+
+/**
+ * Receipt / Kitchen / Reprint — one or two physical jobs; allow time for slow thermal/USB paths.
+ */
+export const THERMAL_PRINT_INTERACTIVE_TIMEOUT_MS = 35_000;
+
 /** Backend thermal print (USB/agent). See BACKEND_HANDOFF §9b. */
 export async function requestOrderThermalPrint(
   orderId: string,
   token: string,
   variant: OrderThermalPrintVariant = 'both',
+  opts?: { signal?: AbortSignal },
 ): Promise<void> {
   await requestJson<unknown>(
     `/orders/${orderId}/print`,
-    { method: 'POST', body: JSON.stringify({ variant }) },
+    { method: 'POST', body: JSON.stringify({ variant }), signal: opts?.signal },
     token,
   );
+}
+
+/** Thermal print with timeout; throws on failure or `AbortError` if the deadline is hit. */
+export async function requestOrderThermalPrintWithTimeout(
+  orderId: string,
+  token: string,
+  variant: OrderThermalPrintVariant = 'both',
+  timeoutMs: number = THERMAL_PRINT_TIMEOUT_MS,
+): Promise<void> {
+  const ac = new AbortController();
+  const tid = window.setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    await requestOrderThermalPrint(orderId, token, variant, { signal: ac.signal });
+  } finally {
+    window.clearTimeout(tid);
+  }
 }
 
 export async function fetchOrders(

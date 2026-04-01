@@ -27,7 +27,33 @@ import { TakeOrderView } from './TakeOrder'
 import { TimesheetView } from './TimesheetView'
 import { mergeEmployeeDirectory } from './employeeDisplay'
 import { useToast } from './Toast'
+import { OfflineProvider, useOffline } from './offline/OfflineContext'
 import type { AuthSession, CompanyInfo, Employee, MenuItem, PaymentMethodConfig, TimeEntry, UserRole } from './types'
+
+function TopBarOfflineSlot() {
+  const { online, pendingOutboxCount, isSyncing, syncNow } = useOffline()
+  if (!online) {
+    return (
+      <span
+        className="topbar-offline-badge"
+        title="Orders and refunds are stored on this device and upload when you are back online."
+      >
+        Offline{pendingOutboxCount > 0 ? ` · ${pendingOutboxCount} pending` : ''}
+      </span>
+    )
+  }
+  if (pendingOutboxCount === 0) return null
+  return (
+    <button
+      type="button"
+      className="btn btn-topbar topbar-sync-btn"
+      disabled={isSyncing}
+      onClick={() => void syncNow()}
+    >
+      {isSyncing ? 'Syncing…' : `Sync ${pendingOutboxCount} to server`}
+    </button>
+  )
+}
 
 const SESSION_KEY = 'clock-system.session.v1'
 const THEME_KEY = 'clock-system.theme.v1'
@@ -597,6 +623,7 @@ export default function App() {
   /* ── Main app ───────────────────────────── */
 
   return (
+    <OfflineProvider token={session?.token ?? null}>
     <div className="shell">
       {/* ── Top bar ── */}
       <header className="topbar">
@@ -627,6 +654,7 @@ export default function App() {
           )}
         </div>
         <div className="topbar-right">
+          <TopBarOfflineSlot />
           <span className="user-chip">
             {currentUser.name} · {currentUser.role}
           </span>
@@ -663,11 +691,18 @@ export default function App() {
             paymentMethods={paymentMethods}
             autoCompleteNewOrders={autoCompleteNewOrders}
             defaultPaymentMethodCode={defaultPaymentMethodCode}
+            companyInfo={companyInfo}
+            thermalPaperWidth={thermalPaperWidth}
           />
         )}
 
         {activeView === 'orderHistory' && session && (
-          <OrderHistoryView token={session.token} paymentMethods={paymentMethods} />
+          <OrderHistoryView
+            token={session.token}
+            paymentMethods={paymentMethods}
+            companyInfo={companyInfo}
+            thermalPaperWidth={thermalPaperWidth}
+          />
         )}
 
         {activeView === 'reports' && session && (
@@ -1299,5 +1334,6 @@ export default function App() {
         )}
       </main>
     </div>
+    </OfflineProvider>
   )
 }

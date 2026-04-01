@@ -42,6 +42,7 @@ Non-cash orders: omit `tenderCents` or send `null`.
 ## 3. `POST /api/orders` — existing fields (recap)
 
 - `employeeId`, `lines[]`, `paymentMethod`, optional `discountCents`, optional **`paymentMethodDetail`**
+- Optional **`orderNumber`** (string): Sent when replaying an offline checkout (e.g. **`OFF-AB12`**). If non-empty after trim, **store and return** this value on the created order (and on **`GET /api/orders`**) so receipts, history, and other devices match the label staff already printed. If omitted, keep your existing auto-numbering.
 - Optional **`autoCompleteNewOrders`** (boolean): Super Admin sets this in the app **Settings → New orders**. When **`true`**, create the order with status **`COMPLETED`** (typical paid-at-counter flow). When **`false`** or omitted, create as **`PENDING`** (e.g. kitchen / fulfillment must complete it later). The client always sends this field explicitly (`true` or `false`) based on the toggle.
 - **`paymentMethod`** must stay within your enum (e.g. `CASH` | `CARD` | `OTHER`). When the cashier picks a custom method (e.g. TNG), the client sends `paymentMethod: "OTHER"` and **`paymentMethodDetail`**: cashier **code** string (e.g. `"TNG"`). **Persist and echo** this field on responses and on **`GET /api/orders`** so history, receipts, and reports show the correct label after reload.
 - Validate lines, compute **`totalCents`** server-side (including discount)
@@ -131,10 +132,11 @@ Optional **`GET /api/orders/:id/audit`** for admin UI later.
 
 ## 9. Printing
 
-The **POS client does not call `window.print()`** for slips or reports. **All thermal output** is the backend’s responsibility:
+The **POS browser does not use `window.print()`** for slips during normal online checkout (offline POS uses browser print). **Server thermal output** is the backend’s responsibility:
 
-- Every **`POST /api/orders`** includes **`printThermal: true`**. After the order is saved, the server should print **customer receipt** then **kitchen slip** (cut between), using **§9c** as the layout spec.
-- **Reprint last order** (Take Order) and **Receipt** / **Kitchen** (Order history) call **`POST /api/orders/:id/print`** with `{ "variant": "both" | "receipt" | "kitchen" }`.
+- **`POST /api/orders`** is sent with **`printThermal: false`** so checkout **returns as soon as the order is saved**. The client then calls **`POST /api/orders/:id/print`** with **`variant: "both"`** (receipt then kitchen). The client uses a **generous timeout** (~35–45s) because the server may not respond until receipt/kitchen jobs finish on USB; too short a timeout caused false “printer not responding” even when print succeeded. If the request still fails or times out, the client opens **browser print** as fallback. Checkout stays fast because **`POST /orders` does not wait on print**.
+- If you support **`printThermal: true`** on create, **do not block** the HTTP response on printing for more than a second or two — prefer the same “save then async print” pattern.
+- **Reprint last order** (Take Order) and **Receipt** / **Kitchen** (Order history) also use **`POST /api/orders/:id/print`** with `{ "variant": "both" | "receipt" | "kitchen" }` (with the same timeout on the client).
 
 **Reports / timesheets:** the UI only offers **CSV export** today. If you need printable PDFs, add server endpoints later.
 
@@ -189,11 +191,11 @@ Authorization: Bearer …
   "employeeId": "…",
   "lines": [ … ],
   "paymentMethod": "CASH",
-  "printThermal": true
+  "printThermal": false
 }
 ```
 
-- The client **always** sends **`printThermal: true`**. If the printer is offline, you may still return **`201`** and log the error, or return **`201`** with `{ "printWarning": "…" }`.
+- The POS sends **`printThermal: false`** on checkout so **`POST /orders` responds quickly** after the order is persisted. Printing is triggered separately via **`POST /orders/:id/print`**. If you still honor **`printThermal: true`**, never hold the create response waiting on the physical printer.
 
 **B — explicit print / reprint endpoint**
 
@@ -222,8 +224,8 @@ Super Admin opens **Settings → POS printer and payment (server)**, taps **Edit
 
 ### Frontend (summary)
 
-- **`POST /api/orders`:** body always includes **`printThermal: true`** (in addition to lines, payment, etc.).
-- **`POST /api/orders/:id/print`:** used for reprint-last-order and history **Receipt** / **Kitchen** actions.
+- **`POST /api/orders`:** includes **`printThermal: false`** on place-order so saving the sale is not delayed by USB/queue issues.
+- **`POST /api/orders/:id/print`:** called after create (**both** slips), reprint, and history **Receipt** / **Kitchen**; the client waits up to tens of seconds for a response (printing can be slow), then falls back to **browser print** if needed. Prefer returning as soon as jobs are **queued** to the OS spooler (fast HTTP response) instead of waiting for the physical printer to finish every byte — that keeps one connection from staying open unnecessarily.
 
 ---
 
@@ -304,7 +306,7 @@ Kitchen slip **does not** show prices, subtotal, payment, or tender/change.
 | **`kitchen`** | Kitchen slip only. |
 | **`both`** | Receipt then kitchen. On USB, prefer **two jobs** with a **cut** between (see §9b). |
 
-**After `POST /orders` with `printThermal: true`:** print **receipt** first, then **cut** (or pause ~2s if hardware needs it), then **kitchen**, same as the old split browser flow.
+**After `POST /orders/:id/print` with `variant: "both"`** (or after create if you still print inline when `printThermal: true`): print **receipt** first, then **cut** (or pause ~2s if hardware needs it), then **kitchen**, same as the old split browser flow.
 
 ### Data shapes (from `frontend/src/types.ts`)
 

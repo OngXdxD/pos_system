@@ -2,10 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { defaultCustomRangeStrings, parseLocalDateInput } from './reportUtils'
 import {
   changeOrderPaymentMethod,
-  fetchOrdersPage,
+  isAbortError,
   refundOrder,
-  requestOrderThermalPrint,
+  requestOrderThermalPrintWithTimeout,
+  THERMAL_PRINT_INTERACTIVE_TIMEOUT_MS,
 } from './api'
+import { addPendingRefund, updatePendingPlaceRefund, upsertServerOrderInSnapshot } from './offline/db'
+import { useOffline } from './offline/OfflineContext'
+import { parseLocalIdFromOrderId } from './offline/localPlaceOrder'
+import { getMergedOrdersForExport, getMergedOrdersPage, prefetchDayFromServer } from './offline/mergeOrders'
+import { OrderPrintSlips, type PrintJob } from './OrderPrintSlips'
+import { buildBrowserPrintJob } from './printJobFromOrder'
 import { formatOrderDisplay } from './orderDisplay'
 import { downloadCsv, toCsvRow } from './csvExport'
 import {
@@ -13,8 +20,9 @@ import {
   resolvePaymentMethodLabel,
   toApiPaymentMethod,
 } from './paymentMethodApi'
+import type { ThermalPaperWidth } from './thermalReceiptStore'
 import { useToast } from './Toast'
-import type { Order, OrderStatus, PaymentMethodConfig } from './types'
+import type { CompanyInfo, Order, OrderStatus, PaymentMethodConfig } from './types'
 
 function centsToRM(cents: number): string {
   return (cents / 100).toFixed(2)
@@ -78,16 +86,20 @@ function resolvePaymentCodeForEdit(o: Order, methods: PaymentMethodConfig[]): st
 type ActionKind = 'refund' | 'payment' | null
 
 const PAGE_SIZE = 10
-const EXPORT_PAGE_SIZE = 300
 
 export function OrderHistoryView({
   token,
   paymentMethods,
+  companyInfo,
+  thermalPaperWidth,
 }: {
   token: string
   paymentMethods: PaymentMethodConfig[]
+  companyInfo: CompanyInfo
+  thermalPaperWidth: ThermalPaperWidth
 }) {
   const showToast = useToast()
+  const { online, refreshPendingCount } = useOffline()
   const [orders, setOrders] = useState<Order[]>([])
   const [historyDay, setHistoryDay] = useState(() => defaultCustomRangeStrings().from)
   const [loading, setLoading] = useState(true)
@@ -102,34 +114,54 @@ export function OrderHistoryView({
   const [page, setPage] = useState(0)
   const [totalCount, setTotalCount] = useState<number | null>(null)
   const [exportBusy, setExportBusy] = useState(false)
+  const [printJob, setPrintJob] = useState<PrintJob | null>(null)
 
   const handleThermalSlipPrint = useCallback(
     async (o: Order, variant: 'receipt' | 'kitchen') => {
+      if (!online || o.id.startsWith('local:')) {
+        setPrintJob(buildBrowserPrintJob(o, companyInfo, paymentMethods, variant))
+        return
+      }
       try {
         setThermalSlipBusy(true)
-        await requestOrderThermalPrint(o.id, token, variant)
+        await requestOrderThermalPrintWithTimeout(
+          o.id,
+          token,
+          variant,
+          THERMAL_PRINT_INTERACTIVE_TIMEOUT_MS,
+        )
         showToast('Server print requested.', 'success')
       } catch (err) {
-        showToast(err instanceof Error ? err.message : 'Server print failed', 'error')
+        setPrintJob(buildBrowserPrintJob(o, companyInfo, paymentMethods, variant))
+        showToast(
+          isAbortError(err)
+            ? 'Thermal printer not responding — use the browser print dialog instead.'
+            : `${err instanceof Error ? err.message : 'Print failed'} — use the browser print dialog.`,
+          'info',
+        )
       } finally {
         setThermalSlipBusy(false)
       }
     },
-    [showToast, token],
+    [companyInfo, online, paymentMethods, showToast, token],
   )
 
   const load = useCallback(async () => {
     const fromD = parseLocalDateInput(historyDay, false)
     const toD = parseLocalDateInput(historyDay, true)
+    const from = fromD.toISOString()
+    const to = toD.toISOString()
     try {
       setLoading(true)
       setErr(null)
-      const { orders: list, total } = await fetchOrdersPage(token, {
-        from: fromD.toISOString(),
-        to: toD.toISOString(),
-        limit: PAGE_SIZE,
-        offset: page * PAGE_SIZE,
-      })
+      if (online) {
+        try {
+          await prefetchDayFromServer(token, historyDay, from, to)
+        } catch {
+          /* use IndexedDB cache only */
+        }
+      }
+      const { orders: list, total } = await getMergedOrdersPage(historyDay, page, PAGE_SIZE)
       setOrders(list)
       setTotalCount(total)
     } catch (e) {
@@ -137,7 +169,7 @@ export function OrderHistoryView({
     } finally {
       setLoading(false)
     }
-  }, [token, historyDay, page])
+  }, [token, historyDay, page, online])
 
   useEffect(() => {
     void load()
@@ -183,6 +215,31 @@ export function OrderHistoryView({
     try {
       setActionBusy(true)
       setActionFeedback(null)
+      if (actionKind === 'payment' && !online) {
+        showToast('Change payment requires an internet connection.', 'error')
+        return
+      }
+      if (actionKind === 'refund' && !online) {
+        const localId = parseLocalIdFromOrderId(actionOrder.id)
+        if (localId) {
+          await updatePendingPlaceRefund(localId, pc)
+        } else {
+          await addPendingRefund({
+            id: crypto.randomUUID(),
+            orderId: actionOrder.id,
+            employeePasscode: pc,
+            createdAt: new Date().toISOString(),
+          })
+          await upsertServerOrderInSnapshot(historyDay, { ...actionOrder, status: 'REFUNDED' })
+        }
+        await refreshPendingCount()
+        setOrders((prev) =>
+          prev.map((x) => (x.id === actionOrder.id ? { ...x, status: 'REFUNDED' as const } : x)),
+        )
+        setActionFeedback({ ok: true, text: 'Refund saved. It will sync when you are online.' })
+        setTimeout(closeAction, 1600)
+        return
+      }
       if (actionKind === 'refund') {
         const updated = await refundOrder(actionOrder.id, pc, token)
         setOrders((prev) => prev.map((x) => (x.id === updated.id ? updated : x)))
@@ -190,7 +247,6 @@ export function OrderHistoryView({
       } else {
         if (!newPaymentCode) {
           showToast('Choose a payment method', 'error')
-          setActionBusy(false)
           return
         }
         const apiPay = toApiPaymentMethod(newPaymentCode)
@@ -241,22 +297,14 @@ export function OrderHistoryView({
     const to = toD.toISOString()
     try {
       setExportBusy(true)
-      const all: Order[] = []
-      let offset = 0
-      for (let guard = 0; guard < 500; guard++) {
-        const { orders: chunk } = await fetchOrdersPage(token, {
-          from,
-          to,
-          limit: EXPORT_PAGE_SIZE,
-          offset,
-        })
-        all.push(...chunk)
-        if (chunk.length < EXPORT_PAGE_SIZE) break
-        offset += EXPORT_PAGE_SIZE
+      if (online) {
+        try {
+          await prefetchDayFromServer(token, historyDay, from, to)
+        } catch {
+          /* merged export still includes local pending */
+        }
       }
-      const sortedExport = [...all].sort(
-        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-      )
+      const sortedExport = await getMergedOrdersForExport(historyDay)
       const lines = [
         toCsvRow(['Order', 'Created (ISO)', 'Total (RM)', 'Status', 'Payment', 'Order ID']),
       ]
@@ -386,6 +434,8 @@ export function OrderHistoryView({
                               type="button"
                               className="btn btn-outline"
                               style={{ padding: '4px 8px', fontSize: 12 }}
+                              disabled={!online}
+                              title={!online ? 'Requires an internet connection' : undefined}
                               onClick={() => openChangePayment(o)}
                             >
                               Change Payment Method
@@ -488,6 +538,12 @@ export function OrderHistoryView({
           </div>
         </div>
       )}
+
+      <OrderPrintSlips
+        job={printJob}
+        paperWidth={thermalPaperWidth}
+        onAfterPrint={() => setPrintJob(null)}
+      />
     </div>
   )
 }
